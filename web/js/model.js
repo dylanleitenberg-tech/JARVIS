@@ -56,6 +56,10 @@
     return { positions: new Float32Array(verts), normals: null };
   }
 
+  // The model is scaled to fit a 2-unit box, so 0.7 puts the camera at its
+  // surface: close enough to read a bolt. 9 is the whole part small in frame.
+  const ZOOM_MIN = 0.7, ZOOM_MAX = 9;
+
   class ModelViewer {
     constructor() {
       this.open = false;
@@ -220,7 +224,7 @@
         const span = Math.hypot(hands[0].palm[0] - hands[1].palm[0],
                                 hands[0].palm[1] - hands[1].palm[1]);
         if (this._span != null) {
-          this.targetDistance = Math.max(1.2, Math.min(9,
+          this.targetDistance = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX,
             this.targetDistance - (span - this._span) * 9));
         }
         this._span = span;
@@ -262,14 +266,31 @@
           return;
         }
         const g = this.grab;
+        // A hand pulled close to the lens runs off the edge of the frame, and
+        // the landmarks that remain are guesses: the hand "shrinks", and a zoom
+        // read from its size would spring back out. So the zoom accumulates
+        // frame to frame, only while the whole hand is in view and the change
+        // is one a hand can make in a frame; otherwise it holds where it is.
+        const b = hand.bbox;
+        const inFrame = !b || (b[0] > 0.02 && b[1] > 0.02 && b[0] + b[2] < 0.98 && b[1] + b[3] < 0.98);
+        if (!inFrame) {
+          g.x = hand.palm[0]; g.y = hand.palm[1]; g.rx = this.target.x; g.ry = this.target.y;
+          g.scale = scale; g.open = openness;
+          return;
+        }
         const dx = hand.palm[0] - g.x;
         const dy = hand.palm[1] - g.y;
         this.target.y = g.ry + dx * 6.0;
         this.target.x = Math.max(-Math.PI, Math.min(Math.PI, g.rx + dy * 5.0));
-        const toward = Math.log(scale / g.scale);     // + as the hand comes nearer
-        const opened = openness - g.open;             // + as the fingers spread
-        this.targetDistance = Math.max(1.2, Math.min(9,
-          g.d - toward * 2.6 + opened * 1.5));
+        let toward = Math.log(scale / g.scale);       // + as the hand comes nearer
+        let opened = openness - g.open;               // + as the fingers spread
+        if (Math.abs(toward) < 0.012) toward = 0;     // landmark jitter, not motion
+        if (Math.abs(opened) < 0.015) opened = 0;
+        if (Math.abs(toward) < 0.35 && Math.abs(opened) < 1.2) {
+          this.targetDistance = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX,
+            this.targetDistance - toward * 2.6 + opened * 1.5));
+        }
+        g.scale = scale; g.open = openness;           // reference rolls forward
         return;
       }
 
@@ -279,7 +300,7 @@
           this.grab = { mode: 'zoom', gap: gaps[0], d: this.targetDistance };
           return;
         }
-        this.targetDistance = Math.max(1.2, Math.min(9,
+        this.targetDistance = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX,
           this.grab.d - (gaps[0] - this.grab.gap) * 2.4));
         return;
       }

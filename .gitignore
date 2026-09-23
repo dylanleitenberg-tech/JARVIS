@@ -2,8 +2,5 @@
 .chrome-profile/
 __pycache__/
 *.pyc
-logs/
-JARVIS.app/
-.bundle-hash
-.DS_Store
+logs/*.log
 jarvis.json
