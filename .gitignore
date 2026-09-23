@@ -1,0 +1,9 @@
+.venv/
+.chrome-profile/
+__pycache__/
+*.pyc
+logs/
+JARVIS.app/
+.bundle-hash
+.DS_Store
+jarvis.json

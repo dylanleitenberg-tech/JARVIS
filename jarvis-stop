@@ -1,0 +1,64 @@
+#!/bin/bash
+# Stop everything J.A.R.V.I.S. is holding, and say what was actually stopped.
+#
+# There was no way to do this. Closing the window did not do it — the app
+# bundle stays resident on purpose, because it is the signed process that
+# holds the Accessibility grant and serves the control relay, so it outlives
+# the interface by design. From the outside that is indistinguishable from
+# "it keeps running in the background".
+#
+# Order matters: the Python child first, so it releases the camera through its
+# own shutdown path, then the launcher, then the HUD's Chrome.
+
+cd "$(dirname "$0")" || exit 1
+found=0
+
+stop() {                      # stop <pattern> <label> [-x]
+    local flag="" pattern="$1" label="$2"
+    [ "$3" = "-x" ] && flag="-x"
+    # shellcheck disable=SC2086
+    if pgrep $flag -f "$pattern" >/dev/null 2>&1; then
+        found=1
+        printf '  stopping %s' "$label"
+        # shellcheck disable=SC2086
+        pkill $flag -f "$pattern"
+        for _ in $(seq 1 30); do
+            # shellcheck disable=SC2086
+            pgrep $flag -f "$pattern" >/dev/null 2>&1 || break
+            printf '.'
+            sleep 0.2
+        done
+        # shellcheck disable=SC2086
+        if pgrep $flag -f "$pattern" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            pkill -9 $flag -f "$pattern"
+            printf ' (forced)'
+        fi
+        printf '\n'
+    fi
+}
+
+echo
+echo "  standing down"
+echo
+
+# The assistant itself. SIGTERM reaches its shutdown path, which releases the
+# camera and closes the HUD's Chrome before it goes.
+stop "jarvis\.main" "the assistant (releases the camera)"
+
+# The app bundle. It serves the control relay and does not exit on its own.
+stop "JARVIS\.app/Contents/MacOS/jarvis" "the app bundle (control relay)"
+
+# The HUD's own Chrome, if its parent did not take it. Matched on the
+# dedicated profile directory, so this can never touch your own browser.
+stop "chrome-profile" "the HUD window (releases the microphone)"
+
+rm -f logs/control.sock
+
+if [ "$found" = "0" ]; then
+    echo "  nothing was running."
+else
+    echo
+    echo "  stopped. camera and microphone released."
+fi
+echo

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Microphone Test</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<link rel="stylesheet" href="css/jarvis.css">
+<style>
+  /* A single-purpose page: make Chrome ask macOS for the microphone, and say
+     exactly what happened. macOS will not list an app under Privacy >
+     Microphone until that app has actually requested it, so there is no way
+     to add Chrome by hand — it has to be provoked into asking. */
+  body { display: flex; align-items: center; justify-content: center; }
+  .card {
+    position: relative; z-index: 5;
+    width: min(620px, 92vw); padding: 34px 38px;
+    background: linear-gradient(180deg, rgba(8, 32, 48, .6), rgba(3, 14, 22, .5));
+    border: 1px solid var(--hud-mid);
+    clip-path: polygon(18px 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%, 0 18px);
+  }
+  h1 {
+    font-family: var(--font-head); font-size: 15px; letter-spacing: .3em;
+    color: var(--hud-bright); text-shadow: var(--glow); margin-bottom: 8px;
+  }
+  p.lead { color: var(--hud-mid); font-size: 14px; line-height: 1.5; margin-bottom: 22px; }
+  button.big {
+    width: 100%; padding: 18px;
+    font-family: var(--font-head); font-size: 13px; font-weight: 700; letter-spacing: .24em;
+    color: var(--hud); background: rgba(100, 227, 255, .1);
+    border: 1px solid var(--hud); cursor: pointer;
+    clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+    transition: background .2s, box-shadow .2s;
+  }
+  button.big:hover { background: rgba(100, 227, 255, .22); box-shadow: var(--glow-soft); }
+  #result {
+    margin-top: 22px; padding: 16px; min-height: 64px;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+    border-left: 2px solid var(--hud-faint); color: var(--hud-mid);
+    white-space: pre-wrap;
+  }
+  #result.ok { border-left-color: var(--green); color: var(--green); }
+  #result.bad { border-left-color: var(--red); color: var(--red); }
+  .meter { height: 8px; margin-top: 16px; background: rgba(100,227,255,.1); }
+  .meter i { display: block; height: 100%; width: 0; background: var(--hud);
+             box-shadow: var(--glow); transition: width .06s linear; }
+  ol { margin: 18px 0 0 20px; color: var(--hud-mid); font-size: 13px; line-height: 1.7; }
+  a { color: var(--hud); }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>MICROPHONE TEST</h1>
+  <p class="lead">macOS only lists an app under Privacy &amp; Security →
+    Microphone <em>after</em> that app has asked for it. There is no “+” button.
+    This page makes Chrome ask.</p>
+
+  <button class="big" id="go">REQUEST THE MICROPHONE</button>
+  <div class="meter"><i id="level"></i></div>
+  <div id="result">Press the button. macOS should show a permission dialog.</div>
+
+  <ol>
+    <li>Press the button above.</li>
+    <li>Allow it in Chrome, then allow it in the macOS dialog.</li>
+    <li>Google Chrome now appears in the Microphone list — leave it on.</li>
+    <li>Quit Chrome completely (⌘Q) and reopen the HUD.</li>
+  </ol>
+</div>
+
+<div class="fx fx-vignette"></div>
+<div class="fx fx-scanlines"></div>
+
+<script>
+document.getElementById('go').onclick = async () => {
+  const out = document.getElementById('result');
+  out.className = '';
+  out.textContent = 'requesting…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    out.className = 'ok';
+    const track = stream.getAudioTracks()[0];
+    out.textContent = 'GRANTED\n' + (track ? track.label : 'audio track') +
+      '\n\nChrome now has the microphone. Quit Chrome completely (Cmd-Q) and ' +
+      'reopen the HUD.';
+
+    // Show live level, so "granted" is visibly true rather than just claimed.
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    const bar = document.getElementById('level');
+    (function tick() {
+      analyser.getByteFrequencyData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+      const rms = Math.sqrt(sum / buf.length) / 255;
+      bar.style.width = Math.min(100, rms * 320) + '%';
+      requestAnimationFrame(tick);
+    })();
+  } catch (err) {
+    out.className = 'bad';
+    const system = /system/i.test(err.message || '');
+    out.textContent = `${err.name}: ${err.message}\n\n` + (
+      system
+        ? 'macOS is refusing Chrome. Open System Settings > Privacy & Security >\n' +
+          'Microphone and switch Google Chrome on, then quit Chrome completely.'
+        : err.name === 'NotAllowedError'
+          ? 'Chrome itself blocked it for this page. If no dialog appeared, the\n' +
+            'permission was denied earlier — check the padlock in the address bar.'
+          : 'No microphone was available to open.');
+  }
+};
+</script>
+</body>
+</html>

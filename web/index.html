@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>J.A.R.V.I.S.</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<link rel="stylesheet" href="css/jarvis.css">
+</head>
+<body class="booting">
+
+<!-- The canvas carries everything that moves: reactor, rings, particles,
+     hand reticles, radial menu. The DOM carries everything that reads. -->
+<canvas id="core"></canvas>
+
+<!-- ------------------------------------------------------------ top bar -->
+<header class="bar bar-top">
+  <div class="brand">
+    <span class="mark">J.A.R.V.I.S.</span>
+    <span class="sub">JUST A RATHER VERY INTELLIGENT SYSTEM</span>
+  </div>
+  <div class="chips">
+    <div class="chip" id="chip-mic"><i></i><span>MIC</span></div>
+    <div class="chip" id="chip-cam"><i></i><span>OPTICS</span></div>
+    <div class="chip" id="chip-ai"><i></i><span>COGNITION</span></div>
+    <div class="chip" id="chip-axs"><i></i><span>CONTROL</span></div>
+    <div class="chip" id="chip-gesture"><i></i><span>GESTURE</span></div>
+  </div>
+  <button class="switch" id="gesture-switch" title="Gesture control (g)"
+          aria-pressed="false">
+    <span class="switch-label">GESTURES</span>
+    <span class="switch-track"><i></i></span>
+    <span class="switch-state">OFF</span>
+  </button>
+  <button class="ghost power" id="btn-power" title="Power down (shift+Q)">⏻</button>
+  <div class="clock">
+    <div id="clock-time">--:--:--</div>
+    <div id="clock-date" class="muted">— — —</div>
+  </div>
+</header>
+
+<!-- --------------------------------------------------------- left column -->
+<section class="col col-left">
+
+  <article class="panel" id="panel-systems">
+    <h2>SYSTEMS <em id="sys-host"></em></h2>
+    <div class="gauges">
+      <div class="gauge" data-key="cpu"><svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="34"/><circle class="fill" cx="42" cy="42" r="34"/></svg><b>--</b><span>CPU</span></div>
+      <div class="gauge" data-key="mem"><svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="34"/><circle class="fill" cx="42" cy="42" r="34"/></svg><b>--</b><span>MEMORY</span></div>
+      <div class="gauge" data-key="disk"><svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="34"/><circle class="fill" cx="42" cy="42" r="34"/></svg><b>--</b><span>STORAGE</span></div>
+      <div class="gauge" data-key="batt"><svg viewBox="0 0 84 84"><circle class="track" cx="42" cy="42" r="34"/><circle class="fill" cx="42" cy="42" r="34"/></svg><b>--</b><span>POWER</span></div>
+    </div>
+    <dl class="readouts" id="sys-readouts"></dl>
+  </article>
+
+  <article class="panel" id="panel-optics">
+    <h2>OPTICAL ARRAY <em id="optics-fps">—</em></h2>
+    <div class="feed-wrap">
+      <img id="feed" alt="">
+      <div class="feed-off" id="feed-off">
+        <span>OPTICS OFFLINE</span>
+        <button class="ghost" data-cmd="vision-on">ENGAGE</button>
+      </div>
+      <div class="feed-scan"></div>
+      <div class="feed-corners"><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="track-row" id="track-row">
+      <span class="track-pill" data-k="hands">HANDS <b>0</b></span>
+      <span class="track-pill" data-k="body">BODY <b>—</b></span>
+      <span class="track-pill" data-k="face">FACE <b>—</b></span>
+    </div>
+    <div class="fingers" id="fingers"></div>
+  </article>
+
+  <article class="panel grow" id="panel-index">
+    <h2>COMMAND INDEX <em id="index-count">—</em></h2>
+    <input id="index-filter" type="text" spellcheck="false" autocomplete="off"
+           placeholder="filter capabilities…">
+    <div class="index-list" id="index-list"></div>
+  </article>
+
+</section>
+
+<!-- -------------------------------------------------------- right column -->
+<section class="col col-right">
+
+  <article class="panel" id="panel-gesture">
+    <h2>GESTURE CONTROL <em id="gesture-state">SAFE</em></h2>
+    <div class="arm-row">
+      <button class="ghost" id="btn-arm">ARM</button>
+      <p class="hint">Hold an open palm to the camera for one second, or say
+        <b>“gesture control on”</b>.</p>
+    </div>
+    <ul class="bindings" id="bindings"></ul>
+  </article>
+
+  <article class="panel grow" id="panel-log">
+    <h2>ACTIVITY</h2>
+    <ol class="log" id="log"></ol>
+  </article>
+
+</section>
+
+<!-- ------------------------------------------------------------- bottom -->
+<footer class="bar bar-bottom">
+  <div class="voice">
+    <canvas id="wave"></canvas>
+    <div class="voice-state" id="voice-state">STANDBY</div>
+  </div>
+  <div class="dialogue">
+    <p class="heard" id="heard"></p>
+    <p class="spoken" id="spoken"></p>
+  </div>
+  <div class="composer">
+    <input id="composer" type="text" spellcheck="false" autocomplete="off"
+           placeholder="type a command…">
+    <button class="ghost" id="btn-mic" title="Toggle listening">LISTEN</button>
+  </div>
+</footer>
+
+<!-- ------------------------------------------------ hand control drawer -->
+<aside class="drawer" id="drawer">
+  <button class="drawer-tab" id="drawer-tab" title="Hand control (h)">
+    <span>HAND CONTROL</span>
+  </button>
+
+  <div class="drawer-body">
+    <header class="drawer-head">
+      <h2>HAND CONTROL</h2>
+      <div class="drawer-state" id="drawer-state">SAFE</div>
+      <button class="ghost" id="drawer-arm">ARM</button>
+    </header>
+
+    <!-- live hand, drawn from the actual landmarks -->
+    <section class="drawer-section">
+      <h3>TRACKING <em id="drawer-fps">—</em></h3>
+      <div class="hand-stage">
+        <canvas id="hand-canvas"></canvas>
+        <div class="hand-empty" id="hand-empty">RAISE A HAND INTO VIEW</div>
+      </div>
+      <div class="digit-grid" id="digit-grid"></div>
+    </section>
+
+    <!-- what each gesture is wired to -->
+    <section class="drawer-section grow">
+      <h3>BINDINGS <em>click to reassign</em></h3>
+      <div class="bind-list" id="bind-list"></div>
+    </section>
+
+    <!-- the numbers worth tuning against a real hand -->
+    <section class="drawer-section">
+      <h3>CALIBRATION</h3>
+      <div class="tune-list" id="tune-list"></div>
+      <div class="tune-actions">
+        <button class="ghost" id="tune-save">SAVE TO CONFIG</button>
+        <button class="ghost" id="tune-reset">REVERT</button>
+      </div>
+    </section>
+  </div>
+</aside>
+
+<!-- The microphone can only be requested from a real click, and Chrome must
+     ask before macOS will even list it. So ask for that click plainly. -->
+<button class="mic-prompt" id="mic-prompt" hidden>
+  <span class="mic-icon">◉</span>
+  <span>
+    <b>ENABLE MICROPHONE</b>
+    <em id="mic-prompt-why">click to let J.A.R.V.I.S. hear you</em>
+  </span>
+</button>
+
+<!-- ------------------------------------------------------- model viewer -->
+<div class="model-view" id="model-view" hidden>
+  <header class="model-head">
+    <div>
+      <h2 id="model-name">NO MODEL</h2>
+      <p id="model-meta"></p>
+    </div>
+    <input id="model-search" type="text" spellcheck="false" autocomplete="off"
+           placeholder="search models…">
+    <button class="ghost" id="model-reset">RESET VIEW</button>
+    <button class="ghost" id="model-close">CLOSE</button>
+  </header>
+  <div class="model-stage" id="model-stage">
+    <div class="model-status" id="model-status" hidden></div>
+    <div class="model-hint">pinch to turn · two fingers to slide · both hands to zoom</div>
+  </div>
+  <div class="model-list" id="model-list"></div>
+</div>
+
+<!-- The canvas keeps animating whether or not the backend is alive, which
+     makes a dead link look like a working system. Say so, loudly. -->
+<div class="offline" id="offline" hidden>
+  <div class="offline-box">
+    <h3>LINK LOST</h3>
+    <p>The J.A.R.V.I.S. process is not running.</p>
+    <pre>cd ~/JARVIS &amp;&amp; ./jarvis-run</pre>
+    <small>run it from your own Terminal — reconnecting automatically</small>
+  </div>
+</div>
+
+<!-- ------------------------------------------------------- confirmation -->
+<div class="confirm" id="confirm" hidden>
+  <div class="confirm-box">
+    <h3>CONFIRM</h3>
+    <p id="confirm-text"></p>
+    <div class="confirm-actions">
+      <button class="ghost danger" id="confirm-yes">PROCEED</button>
+      <button class="ghost" id="confirm-no">ABORT</button>
+    </div>
+    <small>say “yes” or “cancel”, or give a thumbs up or down</small>
+  </div>
+</div>
+
+<!-- -------------------------------------------------------------- boot -->
+<div class="boot" id="boot">
+  <pre id="boot-text"></pre>
+</div>
+
+<!-- -------------------------------------------------- full-screen overlays -->
+<div class="fx fx-vignette"></div>
+<div class="fx fx-scanlines"></div>
+<div class="fx fx-grain"></div>
+<div class="fx fx-flicker"></div>
+
+<script src="js/bus.js"></script>
+<script src="js/core.js"></script>
+<script src="js/speech.js"></script>
+<script src="vendor/three.min.js"></script>
+<script src="js/model.js"></script>
+<script src="js/hud.js"></script>
+<script src="js/handpanel.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
