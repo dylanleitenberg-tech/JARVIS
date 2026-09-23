@@ -59,14 +59,16 @@ if not HAS_MODELS:
     print("\n  SKIP  model routing — no models indexed on this machine")
 else:
     print("\nnaming the format asks for the editor; the bare name asks for the mesh")
+    # "open X cad" brings the hologram up in the HUD; only naming the editor
+    # ("in openscad") opens the application.
     # "cad" and "scad" are the same request and, spoken, near enough the same
     # sound. Only "scad" was accepted, so "open astrowilly cad" quietly showed
     # a mesh in the HUD instead of opening the CAD application.
-    says("open astrowilly cad", "__open_source")
-    says("open astrowilly scad", "__open_source")
-    says("open astrowilly in cad", "__open_source")
+    says("open astrowilly cad", "__model")
+    says("open astrowilly scad", "__model")
+    says("open astrowilly in cad", "__model")
     says("open astrowilly in openscad", "__open_source")
-    says("jarvis open astrowilly cad", "__open_source")
+    says("jarvis open astrowilly cad", "__model")
     says("open astrowilly", "__model")
     says("show me astrowilly", "__model")
     # The name does not have to be exact, or said the way it is spelt.

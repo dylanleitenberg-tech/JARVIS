@@ -206,7 +206,8 @@
 
     /* ---------------------------------------------------------- the hands */
 
-    /* Pinch to turn it, two fingers to slide it, palms apart to zoom. The
+    /* Pinch to turn it, two fingers to slide it, thumb and finger apart to
+       zoom (or both palms apart). The
        maths is the same relative-anchor idea CAD mode uses: the grab point is
        remembered and only the delta since then is applied. */
     onVision(payload) {
@@ -232,7 +233,23 @@
       const gaps = hand.pinches || [hand.pinch, 9, 9, 9];
       const reach = hand.reaches || [hand.index_reach || 0, 0, 0, 0];
       const pinching = gaps[0] < 0.3 && reach[0] >= 1.3;
-      const twoFingers = hand.n_extended === 2 && hand.extended[0] && hand.extended[1];
+      const ext = hand.extended || [];
+      const twoFingers = hand.n_extended === 2 && ext[0] && ext[1];
+      // Index out, the other three curled, thumb free: the thumb-to-index gap
+      // is the zoom. Stretch them apart to come closer, bring them together to
+      // back away, and closing them all the way becomes the pinch that turns.
+      const pointing = !pinching && ext[0] && !ext[1] && !ext[2] && !ext[3];
+
+      if (pointing) {
+        this.spin = false;
+        if (!this.grab || this.grab.mode !== 'zoom') {
+          this.grab = { mode: 'zoom', gap: gaps[0], d: this.targetDistance };
+          return;
+        }
+        this.targetDistance = Math.max(1.2, Math.min(9,
+          this.grab.d - (gaps[0] - this.grab.gap) * 2.4));
+        return;
+      }
 
       if (pinching || twoFingers) {
         this.spin = false;

@@ -64,16 +64,23 @@ def _open_in_cad(m) -> Optional[Intent]:
     return ("__open_source", {"query": m.group(1).strip(), "app": app}, "")
 
 
-@rule(r"^(?:open|load|edit|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
-      r"(?:\s+in)?\s+(?:s?cad|open ?scad|step|f3d|source)(?:\s+file)?[.!]?$")
-def _open_named_source(m) -> Optional[Intent]:
-    """"Open astrowilly cad" — naming the format is asking for the editor.
+@rule(r"^(?:open|load|show|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
+      r"(?:\s+in)?\s+(?:s?cad|open ?scad)(?:\s+file)?[.!]?$")
+def _open_named_cad(m) -> Optional[Intent]:
+    """"Open astrowilly cad" — the hologram, in the interface.
 
     Both "cad" and "scad", because they are the same request and, spoken, the
     same sound: the leading s of "scad" does not survive the d of "astrowilly
-    scad" reliably, and either way what is being asked for is the CAD
-    application, not a mesh in the HUD viewer.
+    scad" reliably. Either way the model comes up in the HUD viewer, turned by
+    hand; the editor is only asked for by name ("open astrowilly in openscad").
     """
+    return ("__model", {"query": m.group(1).strip()}, "")
+
+
+@rule(r"^(?:open|load|edit|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
+      r"(?:\s+in)?\s+(?:step|f3d|source)(?:\s+file)?[.!]?$")
+def _open_named_source(m) -> Optional[Intent]:
+    """A STEP or Fusion file cannot be drawn in the HUD, so those open the editor."""
     return ("__open_source", {"query": m.group(1).strip(), "app": "openscad"}, "")
 
 
