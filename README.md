@@ -313,6 +313,39 @@ Set `server.persist_hud` to false to turn all of this off.
 
 ---
 
+## The model viewer
+
+Say "show the worm" (or "open astrowilly cad") and the part appears inside the
+interface as a hologram, on a grid, and you turn it with your hands. Nothing
+else has to be installed or open: STL is read directly, and a `.scad` file is
+compiled to STL on the spot, so the part you are turning is the current
+source. `m` opens the viewer with a search box; every STL and SCAD under the
+configured roots is indexed by name.
+
+| hand | does |
+|---|---|
+| open hand, moved | turns the model |
+| open hand pulled toward the camera, or fingers closing | zooms in |
+| open hand pushed away, or fingers opening | zooms out |
+| pinch and move | turns |
+| two fingers | slides |
+| index out, thumb and finger apart or together | zooms |
+| both palms apart or together | zooms |
+
+The camera sits in a small box in the corner while the viewer is up, so the
+hand doing the turning stays in view (and in a screen recording). While the
+viewer is open an open palm belongs to the model: it neither switches apps
+nor opens the radial menu.
+
+Only your hands drive. The hand already being followed keeps control even if
+a bigger hand appears, a second person's hand cannot take over until yours has
+been out of frame for a second, and a second hand counts as yours only when it
+is the other hand, near the first, and about the same size. Commands survive
+other people talking: "show the worm, ok so anyway" still shows the worm.
+
+Zoom holds where it is the moment your hand touches the edge of the frame
+instead of springing back, and goes in until the camera is at the surface.
+
 ## CAD mode
 
 Orbit, pan and zoom are what a 3D viewport needs constantly, and they are what
