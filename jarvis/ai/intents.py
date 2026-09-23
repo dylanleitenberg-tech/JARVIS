@@ -65,7 +65,7 @@ def _open_in_cad(m) -> Optional[Intent]:
 
 
 @rule(r"^(?:open|load|show|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
-      r"(?:\s+in)?\s+(?:s?cad|open ?scad)(?:\s+file)?[.!]?$")
+      r"(?:\s+in)?\s+(?:s?cad|open ?scad)(?:\s+file)?\b(?:[.!,]?\s+.*)?[.!]?$")
 def _open_named_cad(m) -> Optional[Intent]:
     """"Open astrowilly cad" — the hologram, in the interface.
 
@@ -95,9 +95,15 @@ def _show_model(m) -> Optional[Intent]:
     target = m.group(1).strip()
     # Only claim this phrase if a model by that name is actually indexed;
     # otherwise "show me the desktop" and "open Safari" still reach their rules.
-    if not _is_model(target):
-        return None
-    return ("__model", {"query": target}, "")
+    # The recogniser finalises at a pause, and with other people talking the
+    # pause comes after their words, so "show the worm ok so anyway" arrives as
+    # one utterance: try the phrase, then shorter and shorter from the right.
+    words = target.split()
+    for n in range(min(len(words), 8), 0, -1):
+        candidate = " ".join(words[:n])
+        if _is_model(candidate):
+            return ("__model", {"query": candidate}, "")
+    return None
 
 
 # ------------------------------------------------------------------- apps

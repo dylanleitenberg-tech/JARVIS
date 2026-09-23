@@ -226,7 +226,8 @@
        remembered and only the delta since then is applied. */
     onVision(payload) {
       if (!this.open || !this.ready) return;
-      const hands = payload.hands || [];
+      // Only the hands the tracker attributed to the user drive the model.
+      const hands = (payload.hands || []).filter((h) => h.owner !== false);
       if (hands.length >= 2) {
         const span = Math.hypot(hands[0].palm[0] - hands[1].palm[0],
                                 hands[0].palm[1] - hands[1].palm[1]);

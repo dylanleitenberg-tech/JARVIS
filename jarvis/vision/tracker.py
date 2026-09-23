@@ -53,6 +53,58 @@ def _dist(a, b) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
+
+class HandOwner:
+    """Which hands belong to the person at the keyboard.
+
+    MediaPipe returns every hand it can see, and a second person leaning in was
+    turning the model, arming gestures and clicking. The user is the hand that
+    was already being followed: once a hand is taken as the owner it keeps that
+    status by continuity (nearest palm, similar size) even if a bigger hand
+    appears, and only after it has been gone for a second does the largest hand
+    in view take over. A second hand counts as the same person's only when it
+    is the other chirality, about the same size, and near the first.
+    """
+
+    HOLD_S = 1.0        # how long the owner is remembered after leaving the frame
+    JUMP = 0.25         # max palm travel between frames, in frame widths
+    PAIR_DIST = 0.45    # a second hand of the same person is this close to the first
+
+    def __init__(self) -> None:
+        self.primary: Optional[dict] = None     # palm, scale, label, t
+
+    def mark(self, hands: List[dict], now: float) -> None:
+        for h in hands:
+            h["owner"] = False
+        if not hands:
+            return
+        prim = None
+        if self.primary is not None and now - self.primary["t"] <= self.HOLD_S:
+            best, best_d = None, self.JUMP
+            for h in hands:
+                d = math.hypot(h["palm"][0] - self.primary["palm"][0],
+                               h["palm"][1] - self.primary["palm"][1])
+                ratio = h["scale"] / max(self.primary["scale"], 1e-4)
+                if d < best_d and 0.5 <= ratio <= 2.0:
+                    best, best_d = h, d
+            prim = best
+        if prim is None:
+            if self.primary is not None and now - self.primary["t"] <= self.HOLD_S:
+                return                          # the owner stepped out; nobody else drives yet
+            prim = max(hands, key=lambda h: h["scale"])
+        prim["owner"] = True
+        self.primary = {"palm": list(prim["palm"]), "scale": prim["scale"],
+                        "label": prim["label"], "t": now}
+        for h in hands:
+            if h is prim or h["label"] == prim["label"]:
+                continue
+            ratio = h["scale"] / max(prim["scale"], 1e-4)
+            d = math.hypot(h["palm"][0] - prim["palm"][0], h["palm"][1] - prim["palm"][1])
+            # Two hands of one person are the same distance from the lens, so
+            # near the same size; a stranger's hand is usually not.
+            if 0.75 <= ratio <= 1.35 and d < self.PAIR_DIST:
+                h["owner"] = True
+
 class VisionWorker(threading.Thread):
     daemon = True
 
@@ -161,6 +213,13 @@ class VisionWorker(threading.Thread):
                                 if self.cfg["mirror"]:  # the flip swaps chirality back
                                     label = "left" if label == "right" else "right"
                             hands_out.append(self._describe_hand(lm.landmark, label))
+
+                # Whose hands are these? Decided here, once, so the gesture
+                # engine and the HUD's viewer agree on it.
+                owner = getattr(self, "_owner", None)
+                if owner is None:
+                    owner = self._owner = HandOwner()
+                owner.mark(hands_out, time.time())
 
                 # Pose is the expensive model and body posture changes slowly,
                 # so run it on every third frame.

@@ -282,6 +282,34 @@ async def main() -> int:
     if not ok:
         failures.append("palm did not open the radial menu once the viewer closed")
 
+    # ---- whose hand: a second person's hand must not take over ----------
+    print("\nhand ownership")
+    from jarvis.vision.tracker import HandOwner
+    def scaled(pts, k, cx, cy):
+        return [_Point(cx + (p.x - cx) * k, cy + (p.y - cy) * k) for p in pts]
+    mine = _describe(build_hand(**POSES["open_palm"]), "right")                       # at the keyboard
+    theirs = _describe(scaled(build_hand(**POSES["open_palm"], offset=(-0.3, 0.0)), 1.5, 0.2, 0.55), "left")  # bigger, off to the side
+    own = HandOwner()
+    own.mark([mine], 10.0)
+    a = mine["owner"]
+    own.mark([mine, theirs], 10.1)
+    b = (mine["owner"], theirs["owner"])
+    own.mark([theirs], 10.5)          # mine stepped out half a second ago
+    c = theirs["owner"]
+    own.mark([theirs], 11.6)          # gone for over a second: the hand in view takes over
+    d = theirs["owner"]
+    ok = a and b == (True, False) and not c and d
+    print(f"  {'PASS' if ok else 'FAIL'}  first hand kept as owner: {a}, {b}; stranger waits {not c}, then takes over {d}")
+    if not ok:
+        failures.append(f"ownership {a} {b} {c} {d}")
+    # the same person's other hand is accepted alongside
+    other = _describe(build_hand(**POSES["open_palm"], offset=(0.2, 0.0)), "left")
+    own = HandOwner(); own.mark([mine, other], 20.0)
+    ok = mine["owner"] and other["owner"]
+    print(f"  {'PASS' if ok else 'FAIL'}  the user's own second hand is accepted: {mine['owner']}, {other['owner']}")
+    if not ok:
+        failures.append("second hand of the same person rejected")
+
     print("\n" + ("ALL PASS" if not failures else f"FAILURES:\n  " + "\n  ".join(failures)))
     return 1 if failures else 0
 

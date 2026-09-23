@@ -183,7 +183,8 @@ class GestureEngine:
         # the camera. Hand tracking will happily fit 21 landmarks to background
         # clutter, and a spurious far-away "hand" must never arm or click.
         min_scale = float(self.cfg.get("min_hand_scale", 0.07))
-        hands = [h for h in (event.get("hands") or []) if h.get("scale", 0.0) >= min_scale]
+        hands = [h for h in (event.get("hands") or [])
+                 if h.get("scale", 0.0) >= min_scale and h.get("owner", True)]
         by_label: Dict[str, dict] = {}
         for hand in hands:
             label = hand["label"]

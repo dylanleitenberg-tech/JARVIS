@@ -65,6 +65,10 @@ else:
     # sound. Only "scad" was accepted, so "open astrowilly cad" quietly showed
     # a mesh in the HUD instead of opening the CAD application.
     says("open astrowilly cad", "__model")
+    # other people talking after the command must not break it
+    says("show the worm ok so anyway", "__model")
+    says("open astrowilly cad and then he said no", "__model")
+    says("show me the seed frame yeah whatever", "__model")
     says("open astrowilly scad", "__model")
     says("open astrowilly in cad", "__model")
     says("open astrowilly in openscad", "__open_source")
