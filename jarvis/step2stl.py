@@ -9,10 +9,10 @@ import sys
 
 def main() -> int:
     src, dst = sys.argv[1], sys.argv[2]
-    tol = float(sys.argv[3]) if len(sys.argv) > 3 else 0.6
+    tol = float(sys.argv[3]) if len(sys.argv) > 3 else 0.8
     import cadquery as cq
     shape = cq.importers.importStep(src)
-    cq.exporters.export(shape, dst, tolerance=tol, angularTolerance=0.3,
+    cq.exporters.export(shape, dst, tolerance=tol, angularTolerance=0.45,
                         exportType="STL", opt={"ascii": False})
     return 0
 
