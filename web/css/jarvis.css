@@ -734,6 +734,18 @@ button.ghost.power:hover {
   color: var(--hud-mid);
 }
 .model-status[hidden] { display: none; }
+.model-cam {
+  position: absolute; right: 18px; bottom: 36px; width: 236px; aspect-ratio: 16 / 9;
+  z-index: 5; overflow: hidden; background: #020a10;
+  border: 1px solid var(--hud-mid); box-shadow: var(--glow-soft), inset 0 0 30px rgba(0,0,0,.7);
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+}
+.model-cam[hidden] { display: none; }
+.model-cam img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: .95; transform: scaleX(-1); }
+.model-cam span {
+  position: absolute; left: 10px; top: 6px; z-index: 6;
+  font-family: var(--font-head); font-size: 9px; letter-spacing: .3em; color: var(--hud-bright); text-shadow: var(--glow);
+}
 .model-hint {
   position: absolute; left: 0; right: 0; bottom: 12px; text-align: center;
   font-size: 10px; letter-spacing: .2em; color: var(--hud-dim);

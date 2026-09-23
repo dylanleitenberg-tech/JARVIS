@@ -205,6 +205,13 @@
       // Tell the gesture engine, so a hand waved at the model is not also read
       // as an app switch or a menu.
       if (global.bus && global.bus.send) global.bus.send({ type: 'model_view', open: this.open });
+      // The corner camera: its own MJPEG client, started only while the viewer
+      // is up and dropped on close, so it costs nothing the rest of the time.
+      const cam = $('#model-cam'), camImg = $('#model-cam-img');
+      if (cam && camImg) {
+        cam.hidden = !this.open;
+        camImg.src = this.open ? '/feed.mjpg?' + Date.now() : '';
+      }
       if (this.open) {
         this._setup();
         setTimeout(() => this._resize(), 30);
