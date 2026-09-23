@@ -22,12 +22,17 @@ from typing import Dict, List, Optional
 # command line compiles one to STL in well under a second, which means the
 # model you turn is the live source rather than a stale export — and none of it
 # needs Accessibility, because the model is inside the interface.
-SUFFIXES = (".stl", ".scad")
+SUFFIXES = (".stl", ".scad", ".step", ".stp")
 OPENSCAD = "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD"
+
+# STEP is what Onshape exports, and most of the Mark IV lives only in it. It
+# is converted to STL by CadQuery, which is not in this environment; the first
+# interpreter below that can import it is used, and the result is cached.
+STEP_PYTHONS = ("~/FTC_BIOBUZZ/cqenv/bin/python", "python3")
 
 # Source files cannot be rendered in the HUD — they are code that has to be
 # compiled — but they can be opened in the application that owns them.
-SOURCE_SUFFIXES = (".scad", ".f3d", ".step", ".stp", ".sldprt", ".3mf")
+SOURCE_SUFFIXES = (".scad", ".f3d", ".sldprt", ".3mf")
 SOURCE_APPS = {".scad": "OpenSCAD", ".f3d": "Autodesk Fusion 360",
                ".sldprt": "SOLIDWORKS", ".3mf": "OpenSCAD"}
 
@@ -111,9 +116,12 @@ class ModelIndex:
         path = self.resolve(raw)
         if path is None:
             return None
-        if path.suffix.lower() != ".scad":
-            return path
-        return self.compile_scad(path)
+        suffix = path.suffix.lower()
+        if suffix == ".scad":
+            return self.compile_scad(path)
+        if suffix in (".step", ".stp"):
+            return self.compile_step(path)
+        return path
 
     def compile_scad(self, path: pathlib.Path) -> Optional[pathlib.Path]:
         """Compile a .scad to STL, cached on the source's modification time."""
@@ -145,6 +153,60 @@ class ModelIndex:
         if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
             out.unlink(missing_ok=True)
             self.last_error = (proc.stderr or proc.stdout or "compile failed").strip()[-400:]
+            return None
+        return out
+
+    _step_python: Optional[str] = None
+
+    def step_python(self) -> Optional[str]:
+        """The first interpreter that can import CadQuery, found once."""
+        import shutil
+        import subprocess
+        if self._step_python:
+            return self._step_python
+        for cand in STEP_PYTHONS:
+            exe = str(pathlib.Path(cand).expanduser()) if "/" in cand else shutil.which(cand)
+            if not exe or not pathlib.Path(exe).exists():
+                continue
+            try:
+                ok = subprocess.run([exe, "-c", "import cadquery"], capture_output=True,
+                                    timeout=60).returncode == 0
+            except (subprocess.TimeoutExpired, OSError):
+                ok = False
+            if ok:
+                self._step_python = exe
+                return exe
+        return None
+
+    def compile_step(self, path: pathlib.Path) -> Optional[pathlib.Path]:
+        """Convert a STEP file to binary STL, cached on its modification time."""
+        import hashlib
+        import subprocess
+
+        exe = self.step_python()
+        if exe is None:
+            self.last_error = "no Python with CadQuery to convert STEP"
+            return None
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        key = hashlib.sha1(f"{path}:{stamp}".encode()).hexdigest()[:16]
+        cache = pathlib.Path(__file__).resolve().parent.parent / "build" / "step"
+        cache.mkdir(parents=True, exist_ok=True)
+        out = cache / f"{path.stem}-{key}.stl"
+        if out.exists() and out.stat().st_size > 0:
+            return out
+        script = pathlib.Path(__file__).resolve().parent / "step2stl.py"
+        try:
+            proc = subprocess.run([exe, str(script), str(path), str(out)],
+                                  capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            self.last_error = "STEP conversion timed out"
+            return None
+        if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+            out.unlink(missing_ok=True)
+            self.last_error = (proc.stderr or proc.stdout or "conversion failed").strip()[-400:]
             return None
         return out
 

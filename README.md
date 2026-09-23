@@ -319,8 +319,9 @@ Say "show the worm" (or "open astrowilly cad") and the part appears inside the
 interface as a hologram, on a grid, and you turn it with your hands. Nothing
 else has to be installed or open: STL is read directly, and a `.scad` file is
 compiled to STL on the spot, so the part you are turning is the current
-source. `m` opens the viewer with a search box; every STL and SCAD under the
-configured roots is indexed by name.
+source, and a STEP export (what Onshape produces) is converted the first time
+it is asked for and cached after that. `m` opens the viewer with a search box;
+every STL, SCAD and STEP under the configured roots is indexed by name.
 
 | hand | does |
 |---|---|

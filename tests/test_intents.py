@@ -67,6 +67,9 @@ else:
     says("open astrowilly cad", "__model")
     # other people talking after the command must not break it
     says("show the worm ok so anyway", "__model")
+    # the Mark IV lives in STEP exports; those render too now
+    says("show the aft engine", "__model")
+    says("open the aft engine step", "__model")
     says("open astrowilly cad and then he said no", "__model")
     says("show me the seed frame yeah whatever", "__model")
     says("open astrowilly scad", "__model")

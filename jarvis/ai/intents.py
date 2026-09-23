@@ -77,10 +77,17 @@ def _open_named_cad(m) -> Optional[Intent]:
     return ("__model", {"query": m.group(1).strip()}, "")
 
 
+@rule(r"^(?:open|load|show|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
+      r"(?:\s+in)?\s+(?:step|stp)(?:\s+file)?\b(?:[.!,]?\s+.*)?[.!]?$")
+def _open_named_step(m) -> Optional[Intent]:
+    """STEP renders in the HUD too (converted on demand), so it is a model."""
+    return ("__model", {"query": m.group(1).strip()}, "")
+
+
 @rule(r"^(?:open|load|edit|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
-      r"(?:\s+in)?\s+(?:step|f3d|source)(?:\s+file)?[.!]?$")
+      r"(?:\s+in)?\s+(?:f3d|source)(?:\s+file)?[.!]?$")
 def _open_named_source(m) -> Optional[Intent]:
-    """A STEP or Fusion file cannot be drawn in the HUD, so those open the editor."""
+    """A Fusion file cannot be drawn in the HUD, so it opens the editor."""
     return ("__open_source", {"query": m.group(1).strip(), "app": "openscad"}, "")
 
 
