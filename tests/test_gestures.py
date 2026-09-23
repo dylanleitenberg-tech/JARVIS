@@ -246,6 +246,42 @@ async def main() -> int:
     if not ok:
         failures.append(f"swipe fired {fired}")
 
+    # ---- model viewer up: an open hand belongs to the model -----------------
+    # The same leftward travel that swiped above must not switch apps while the
+    # HUD's viewer is open, and a palm held still must not open the radial menu.
+    print("\nmodel viewer open")
+    bus = Bus(); bus.bind_loop(asyncio.get_running_loop())
+    dispatcher = FakeDispatcher()
+    engine = GestureEngine(cfg, bus, dispatcher)
+    engine.armed = True
+    engine.viewer_open = True
+    for i in range(10):
+        shifted = _describe(build_hand(**POSES["open_palm"],
+                                       offset=(-0.05 * i, 0.0)), "right")
+        await engine.on_vision({"hands": [shifted]})
+        await asyncio.sleep(0.03)
+    fired = [c for c in dispatcher.calls]
+    ok = not any(c[1].get("combo") == "cmd+tab" for c in fired)
+    print(f"  {'PASS' if ok else 'FAIL'}  palm travel with the viewer up -> {fired or '[]'}")
+    if not ok:
+        failures.append(f"viewer-open swipe fired {fired}")
+    palm = _describe(build_hand(**POSES["open_palm"]), "right")
+    for _ in range(12):
+        await engine.on_vision({"hands": [palm]})
+        await asyncio.sleep(0.1)
+    ok = engine.radial is None
+    print(f"  {'PASS' if ok else 'FAIL'}  held palm with the viewer up opens no radial menu")
+    if not ok:
+        failures.append("viewer-open palm opened the radial menu")
+    engine.viewer_open = False
+    for _ in range(12):
+        await engine.on_vision({"hands": [palm]})
+        await asyncio.sleep(0.1)
+    ok = engine.radial is not None
+    print(f"  {'PASS' if ok else 'FAIL'}  same palm with the viewer closed opens it")
+    if not ok:
+        failures.append("palm did not open the radial menu once the viewer closed")
+
     print("\n" + ("ALL PASS" if not failures else f"FAILURES:\n  " + "\n  ".join(failures)))
     return 1 if failures else 0
 

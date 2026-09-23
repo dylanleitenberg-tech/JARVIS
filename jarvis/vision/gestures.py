@@ -153,6 +153,8 @@ class GestureEngine:
         self.zoom_base: Optional[float] = None
         self.radial: Optional[Dict[str, Any]] = None
         self.last_gesture = "none"
+        # The HUD's model viewer takes the open hand for itself while it is up.
+        self.viewer_open = False
         from .cad import CadMode
         self.cad = CadMode(config.get("cad", {}), bus, dispatcher)
 
@@ -282,6 +284,12 @@ class GestureEngine:
         state.scroll_y = None
 
         if state.stable_count < STABLE_FRAMES:
+            return
+
+        # While the model viewer is up, an open hand is turning the model: a
+        # fast sweep must not switch apps and a held palm must not open a menu.
+        if pose == "open_palm" and self.viewer_open:
+            state.trail.clear()
             return
 
         swipe = state.swipe(now, float(self.cfg["swipe_velocity"]))

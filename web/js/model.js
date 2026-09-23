@@ -198,6 +198,9 @@
       this.open = force === undefined ? !this.open : !!force;
       $('#model-view').hidden = !this.open;
       document.body.classList.toggle('model-open', this.open);
+      // Tell the gesture engine, so a hand waved at the model is not also read
+      // as an app switch or a menu.
+      if (global.bus && global.bus.send) global.bus.send({ type: 'model_view', open: this.open });
       if (this.open) {
         this._setup();
         setTimeout(() => this._resize(), 30);
@@ -206,8 +209,8 @@
 
     /* ---------------------------------------------------------- the hands */
 
-    /* Pinch to turn it, two fingers to slide it, thumb and finger apart to
-       zoom (or both palms apart). The
+    /* An open hand turns it and pushes or pulls it; pinch to turn, two
+       fingers to slide, thumb and finger apart (or both palms apart) to zoom. The
        maths is the same relative-anchor idea CAD mode uses: the grab point is
        remembered and only the delta since then is applied. */
     onVision(payload) {
@@ -234,11 +237,41 @@
       const reach = hand.reaches || [hand.index_reach || 0, 0, 0, 0];
       const pinching = gaps[0] < 0.3 && reach[0] >= 1.3;
       const ext = hand.extended || [];
-      const twoFingers = hand.n_extended === 2 && ext[0] && ext[1];
-      // Index out, the other three curled, thumb free: the thumb-to-index gap
-      // is the zoom. Stretch them apart to come closer, bring them together to
-      // back away, and closing them all the way becomes the pinch that turns.
+      const nExt = hand.n_extended != null ? hand.n_extended : ext.filter(Boolean).length;
+      const twoFingers = nExt === 2 && ext[0] && ext[1];
       const pointing = !pinching && ext[0] && !ext[1] && !ext[2] && !ext[3];
+      const openHand = !pinching && nExt === 4;
+      // Openness: the mean thumb-to-finger gap in hand-scales. It falls as the
+      // fingers come together, whether they curl or bunch toward the thumb.
+      const openness = gaps.slice(0, 4).reduce((a, b) => a + b, 0) / 4;
+      const scale = Math.max(hand.scale || 0.1, 1e-4);   // bigger = nearer the lens
+
+      // Open hand: the whole hand is the handle. Moving it turns the model.
+      // Pushing it away (the hand gets smaller) or opening the fingers backs
+      // the view out; pulling it in or closing the fingers brings it closer.
+      // The hold is sticky: once an open hand has the model, closing the
+      // fingers stays a zoom-in rather than becoming some other grip, until the
+      // hand pinches or leaves the frame.
+      const holding = this.grab && this.grab.mode === 'hand';
+      if (openHand || (holding && !pinching)) {
+        this.spin = false;
+        if (!holding) {
+          this.grab = { mode: 'hand', x: hand.palm[0], y: hand.palm[1],
+                        rx: this.target.x, ry: this.target.y,
+                        scale, open: openness, d: this.targetDistance };
+          return;
+        }
+        const g = this.grab;
+        const dx = hand.palm[0] - g.x;
+        const dy = hand.palm[1] - g.y;
+        this.target.y = g.ry + dx * 6.0;
+        this.target.x = Math.max(-Math.PI, Math.min(Math.PI, g.rx + dy * 5.0));
+        const toward = Math.log(scale / g.scale);     // + as the hand comes nearer
+        const opened = openness - g.open;             // + as the fingers spread
+        this.targetDistance = Math.max(1.2, Math.min(9,
+          g.d - toward * 2.6 + opened * 1.5));
+        return;
+      }
 
       if (pointing) {
         this.spin = false;

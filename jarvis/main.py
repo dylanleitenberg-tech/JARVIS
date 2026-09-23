@@ -585,6 +585,9 @@ class Jarvis:
                 self.stat["mic_detail"] = str(msg["detail"])[:200]
                 await self.bus.publish("log", level="warn",
                                        text=f"microphone: {msg['detail']}")
+        elif kind == "model_view":
+            if self.gestures:
+                self.gestures.viewer_open = bool(msg.get("open"))
         elif kind == "ready":
             await self.greet()
         elif kind == "ping":
