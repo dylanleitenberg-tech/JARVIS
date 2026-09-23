@@ -57,8 +57,9 @@
   }
 
   // The model is scaled to fit a 2-unit box, so 0.7 puts the camera at its
-  // surface: close enough to read a bolt. 9 is the whole part small in frame.
-  const ZOOM_MIN = 0.7, ZOOM_MAX = 9;
+  // surface: close enough to read a bolt. 5.5 keeps the whole part about half
+  // the frame tall; further out it was a sliver you could not read or grab.
+  const ZOOM_MIN = 0.7, ZOOM_MAX = 5.5;
 
   class ModelViewer {
     constructor() {
