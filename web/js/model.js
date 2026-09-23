@@ -56,10 +56,12 @@
     return { positions: new Float32Array(verts), normals: null };
   }
 
-  // The model is scaled to fit a 2-unit box, so 0.7 puts the camera at its
-  // surface: close enough to read a bolt. 5.5 keeps the whole part about half
-  // the frame tall; further out it was a sliver you could not read or grab.
-  const ZOOM_MIN = 0.7, ZOOM_MAX = 5.5;
+  // The model is scaled so its longest side spans 2 units. A long thin part
+  // (the worm string) is only 0.13 thick, so the camera has to get well inside
+  // the box before a segment fills the view: 0.2 allows that. 5.5 keeps the
+  // whole part about half the frame tall; further out it was a sliver.
+  const ZOOM_MIN = 0.2, ZOOM_MAX = 5.5;
+  const clampZoom = (d) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, d));
 
   class ModelViewer {
     constructor() {
@@ -233,8 +235,8 @@
         const span = Math.hypot(hands[0].palm[0] - hands[1].palm[0],
                                 hands[0].palm[1] - hands[1].palm[1]);
         if (this._span != null) {
-          this.targetDistance = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX,
-            this.targetDistance - (span - this._span) * 9));
+          this.targetDistance = clampZoom(
+            this.targetDistance * Math.exp(-(span - this._span) * 6));
         }
         this._span = span;
         this.grab = null;
@@ -295,9 +297,12 @@
         let opened = openness - g.open;               // + as the fingers spread
         if (Math.abs(toward) < 0.012) toward = 0;     // landmark jitter, not motion
         if (Math.abs(opened) < 0.015) opened = 0;
+        // Proportional: a pull that halves the hand's distance quarters the
+        // camera's, whatever the current zoom, so one gesture goes from the
+        // whole part to a close-up and the control stays fine near the surface.
         if (Math.abs(toward) < 0.35 && Math.abs(opened) < 1.2) {
-          this.targetDistance = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX,
-            this.targetDistance - toward * 2.6 + opened * 1.5));
+          this.targetDistance = clampZoom(
+            this.targetDistance * Math.exp(-toward * 2.0 + opened * 1.2));
         }
         g.scale = scale; g.open = openness;           // reference rolls forward
         return;
@@ -309,8 +314,8 @@
           this.grab = { mode: 'zoom', gap: gaps[0], d: this.targetDistance };
           return;
         }
-        this.targetDistance = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX,
-          this.grab.d - (gaps[0] - this.grab.gap) * 2.4));
+        this.targetDistance = clampZoom(
+          this.grab.d * Math.exp(-(gaps[0] - this.grab.gap) * 1.8));
         return;
       }
 
