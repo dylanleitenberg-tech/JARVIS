@@ -218,16 +218,32 @@
             creasedNormals(geometry.attributes.position.array, 38), 3));
         }
 
+        // A rebuild cross-fades: the old shape dissolves while the new one
+        // comes up with a brief glow, so an edit reads as the part changing,
+        // not a flicker. A new model simply replaces the old one.
+        const now = performance.now();
         if (this.mesh) {
-          this.group.remove(this.mesh);
-          this.mesh.geometry.dispose();
+          if (rebuild) {
+            const old = this.mesh;
+            old.material.transparent = true;
+            old.material.depthWrite = false;
+            old.children.forEach((c) => { if (c.material) c.material.transparent = true; });
+            this._fading = (this._fading || []).concat([{ mesh: old, t0: now }]);
+          } else {
+            this.group.remove(this.mesh);
+            this.mesh.geometry.dispose();
+            (this._fading || []).forEach((f) => { this.group.remove(f.mesh); f.mesh.geometry.dispose(); });
+            this._fading = [];
+          }
         }
         const material = new THREE.MeshPhongMaterial({
           color: 0x7fd4ef, specular: 0xbfefff, shininess: 28,
           flatShading: !normals && !this.smooth,
+          transparent: rebuild, opacity: rebuild ? 0 : 1,
         });
         this.mesh = new THREE.Mesh(geometry, material);
         this.group.add(this.mesh);
+        this._arrive = rebuild ? now : null;
 
         const edges = new THREE.LineSegments(
           new THREE.EdgesGeometry(geometry, 32),
@@ -544,6 +560,30 @@
       requestAnimationFrame(this._loop);
       if (!this.open || !this.ready || !this.renderer) return;
       if (!this.renderer.domElement.width) this._resize();
+
+      // Cross-fade after an edit: 450 ms out for the old shape, in for the new,
+      // with a cyan glow on the new one that settles over a second.
+      const now = performance.now();
+      if (this._fading && this._fading.length) {
+        this._fading = this._fading.filter((f) => {
+          const k = Math.min(1, (now - f.t0) / 450);
+          f.mesh.material.opacity = 1 - k;
+          f.mesh.children.forEach((c) => { if (c.material) c.material.opacity = 0.28 * (1 - k); });
+          if (k >= 1) { this.group.remove(f.mesh); f.mesh.geometry.dispose(); return false; }
+          return true;
+        });
+      }
+      if (this._arrive != null && this.mesh) {
+        const t = now - this._arrive;
+        const m = this.mesh.material;
+        m.opacity = Math.min(1, t / 450);
+        const glow = Math.max(0, 1 - t / 1100);
+        m.emissive.setRGB(0.10 * glow, 0.55 * glow, 0.75 * glow);
+        if (t > 1100) {
+          m.opacity = 1; m.transparent = false; m.emissive.setRGB(0, 0, 0); m.needsUpdate = true;
+          this._arrive = null;
+        }
+      }
 
       if (this.spin) this.target.y += 0.0035;
 
