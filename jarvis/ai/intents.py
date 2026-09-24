@@ -34,6 +34,13 @@ def _num(text: str, default: int = 50) -> int:
 _ADDRESSED = re.compile(r"^(?:hey\s+|ok\s+|okay\s+)?(?:jarvis|javis|jervis|jarvus)\b[\s,.:;!?-]*",
                         re.I)
 
+# "Can you open the aft engine cad" is the same request as "open the aft engine
+# cad", but every open rule is anchored on the verb, so the polite form matched
+# nothing (or launched an app called "aft engine CAD"). Only stripped in front
+# of an open/show verb, so "can you hear me" is left alone.
+_POLITE = re.compile(r"^(?:please|(?:can|could|would|will)\s+you)\s+(?:please\s+)?"
+                     r"(?=(?:open|show|load|view|display|bring up|pull up)\b)", re.I)
+
 # (regex, builder) — the builder returns (action, args, acknowledgement).
 RULES: List[Tuple[re.Pattern, Any]] = []
 
@@ -210,6 +217,21 @@ def _open_in_cad(m) -> Optional[Intent]:
     return ("__open_source", {"query": m.group(1).strip(), "app": app}, "")
 
 
+@rule(r"^(?:open|load|show|bring up|pull up)\s+(?:me\s+)?(?:the\s+|my\s+)?"
+      r"(?:s?cad|c\.?a\.?d\.?)(?:\s+(?:models?|files?|library))?[.!]?$")
+def _open_cad_alone(m) -> Optional[Intent]:
+    """"Open CAD" with no name. There is no application called CAD, so this
+    used to launch nothing; the model library is where a name gets chosen."""
+    return ("__model", {"query": ""}, "")
+
+
+@rule(r"^(?:open|load|show|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(?:s?cad|c\.?a\.?d\.?)"
+      r"(?:\s+(?:model|file))?\s+(?:for|of)\s+(?:the\s+)?(.+?)[.!]?$")
+def _open_cad_for(m) -> Optional[Intent]:
+    """"Open the CAD for the aft engine" — the name after the format word."""
+    return ("__model", {"query": m.group(1).strip(), "prefer": "source"}, "")
+
+
 @rule(r"^(?:open|load|show|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
       r"(?:\s+in)?\s+(?:s?cad|open ?scad)(?:\s+file)?\b(?:[.!,]?\s+.*)?[.!]?$")
 def _open_named_cad(m) -> Optional[Intent]:
@@ -219,15 +241,17 @@ def _open_named_cad(m) -> Optional[Intent]:
     same sound: the leading s of "scad" does not survive the d of "astrowilly
     scad" reliably. Either way the model comes up in the HUD viewer, turned by
     hand; the editor is only asked for by name ("open astrowilly in openscad").
+    Saying the format asks for the design, so the .scad source beats its
+    exported .stl — only the source brings the dimension panel.
     """
-    return ("__model", {"query": m.group(1).strip()}, "")
+    return ("__model", {"query": m.group(1).strip(), "prefer": "source"}, "")
 
 
 @rule(r"^(?:open|load|show|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
       r"(?:\s+in)?\s+(?:step|stp)(?:\s+file)?\b(?:[.!,]?\s+.*)?[.!]?$")
 def _open_named_step(m) -> Optional[Intent]:
     """STEP renders in the HUD too (converted on demand), so it is a model."""
-    return ("__model", {"query": m.group(1).strip()}, "")
+    return ("__model", {"query": m.group(1).strip(), "prefer": "step"}, "")
 
 
 @rule(r"^(?:open|load|edit|bring up|pull up)\s+(?:me\s+)?(?:the\s+)?(.+?)"
@@ -553,6 +577,7 @@ def match(text: str) -> Optional[Intent]:
     # attached, and then nothing matches at all. Addressing something by name
     # is not part of the request.
     cleaned = _ADDRESSED.sub("", cleaned, count=1).strip()
+    cleaned = _POLITE.sub("", cleaned, count=1).strip()
     if not cleaned:
         return None
 

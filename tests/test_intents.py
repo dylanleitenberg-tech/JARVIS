@@ -35,6 +35,19 @@ def says(utterance: str, action, note: str = "") -> None:
         FAILURES.append(f"{utterance!r} gave {name}, wanted {action}")
 
 
+def opens(utterance: str, suffix: str, stem: str, note: str = "") -> None:
+    """The file a model intent actually resolves to, the way main.py does it."""
+    got = intents.match(utterance)
+    args = got[1] if got and got[0] == "__model" else {}
+    hit = index.best(args.get("query", ""), prefer=args.get("prefer")) if args.get("query") else None
+    path = pathlib.Path(str(hit["path"])) if hit else None
+    ok = path is not None and path.suffix == suffix and path.stem == stem
+    print(f"  {'PASS' if ok else 'FAIL'}  {utterance!r} -> {path.name if path else None}"
+          f"{'  (' + note + ')' if note else ''}")
+    if not ok:
+        FAILURES.append(f"{utterance!r} opened {path}, wanted {stem}{suffix}")
+
+
 print("\nbeing addressed by name is not part of the request")
 # The browser strips the wake word before sending, but a command typed the way
 # it would be spoken arrives with it attached — and then nothing matched.
@@ -81,6 +94,27 @@ else:
     # The name does not have to be exact, or said the way it is spelt.
     says("open astro willy", "__model")
     says("show me the seed frame", "__model")
+
+    print("\nsaying the format asks for the design, not its export")
+    # 2026-09-24: "open Astro Willie CAD" put export_e4/astrowilly.stl up — a
+    # dead mesh with no dimension panel — though astrowilly.scad was indexed.
+    opens("open Astro Willie CAD", ".scad", "astrowilly")
+    opens("open astrowilly scad", ".scad", "astrowilly")
+    opens("open astrowilly", ".stl", "astrowilly", "the bare name still means the mesh")
+    opens("open the aft engine step", ".step", "aft_engine_assembly")
+    opens("open aft engine CAD", ".step", "aft_engine_assembly", "no .scad exists, so STEP")
+    opens("open the CAD for the aft engine", ".step", "aft_engine_assembly")
+
+    print("\nasked politely, or with no name at all")
+    # Every open rule is anchored on the verb, so these matched nothing or
+    # launched an app called "aft engine CAD" / "CAD".
+    says("can you open the aft engine CAD", "__model")
+    says("please open the aft engine CAD", "__model")
+    says("could you please show me the seed frame", "__model")
+    says("open CAD", "__model", "no app is called CAD; the library")
+    says("open the CAD", "__model")
+    says("can you hear me", None, "politeness is only stripped before open/show")
+    says("please open safari", "open_app")
 
 print("\n" + ("ALL PASS" if not FAILURES else f"{len(FAILURES)} FAILED:"))
 for failure in FAILURES:

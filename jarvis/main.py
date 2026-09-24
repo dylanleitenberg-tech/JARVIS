@@ -826,9 +826,13 @@ class Jarvis:
 
             if action == "__model":
                 query = str(args.get("query", "")).strip()
-                hit = self.models.best(query) if query else None
+                hit = self.models.best(query, prefer=args.get("prefer")) if query else None
+                slow = bool(hit) and self.models.needs_build(str(hit["path"]))
                 await self.bus.publish("show_model", model=hit, query=query)
-                if hit:
+                if hit and slow:
+                    await self.say(f"{str(hit['name']).replace('_', ' ')}. "
+                                   f"Building it from the source first; give me a moment.")
+                elif hit:
                     await self.say(f"{str(hit['name']).replace('_', ' ')}. "
                                    f"Pinch to turn it.")
                 else:

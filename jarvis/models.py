@@ -55,6 +55,24 @@ _UI_NOUNS = {"window", "windows", "tab", "tabs", "desktop", "screen", "page",
              "app", "apps", "menu", "folder", "space", "spaces"}
 
 
+# What a spoken format word asks for, best first. "Open astrowilly cad" means
+# the thing that was designed, not its export: the .scad compiles for the
+# viewer and brings its dimension panel with it, where the exported .stl of the
+# same name is a dead mesh. Without a format word the renderable STL still wins.
+PREFER = {
+    "source": (".scad", ".step", ".stp"),
+    "step": (".step", ".stp"),
+}
+
+
+def _native(model: Dict[str, object], prefer: Optional[str]) -> int:
+    suffix = str(model.get("suffix", ""))
+    order = PREFER.get(prefer or "")
+    if order:
+        return len(order) - order.index(suffix) if suffix in order else 0
+    return 2 if suffix == ".stl" else 1
+
+
 def _squash(text: str) -> str:
     """A name with everything but letters and digits removed, for loose matching."""
     return re.sub(r"[^a-z0-9]", "", text.lower())
@@ -124,21 +142,44 @@ class ModelIndex:
             return self.compile_step(path, fine=fine)
         return path
 
-    def compile_scad(self, path: pathlib.Path) -> Optional[pathlib.Path]:
-        """Compile a .scad to STL, cached on the source's modification time."""
+    def _built(self, path: pathlib.Path, fine: bool = False) -> Optional[pathlib.Path]:
+        """Where the viewer's STL for a source lives, keyed on its modification
+        time; None for a file that is shown as it is."""
         import hashlib
-        import subprocess
 
-        if not pathlib.Path(OPENSCAD).exists():
+        suffix = path.suffix.lower()
+        if suffix == ".scad":
+            folder, tail = "scad", ""
+        elif suffix in (".step", ".stp"):
+            folder, tail = "step", "-fine" if fine else ""
+        else:
             return None
         try:
             stamp = path.stat().st_mtime_ns
         except OSError:
             return None
         key = hashlib.sha1(f"{path}:{stamp}".encode()).hexdigest()[:16]
-        cache = pathlib.Path(__file__).resolve().parent.parent / "build" / "scad"
+        cache = pathlib.Path(__file__).resolve().parent.parent / "build" / folder
         cache.mkdir(parents=True, exist_ok=True)
-        out = cache / f"{path.stem}-{key}.stl"
+        return cache / f"{path.stem}-{key}{tail}.stl"
+
+    def needs_build(self, raw: str) -> bool:
+        """True when showing this model means compiling it first. Astrowilly
+        takes ~37 s cold, and a model that goes quiet that long after being
+        announced reads as one that did not open."""
+        path = self.resolve(raw)
+        out = self._built(path) if path is not None else None
+        return out is not None and not (out.exists() and out.stat().st_size > 0)
+
+    def compile_scad(self, path: pathlib.Path) -> Optional[pathlib.Path]:
+        """Compile a .scad to STL, cached on the source's modification time."""
+        import subprocess
+
+        if not pathlib.Path(OPENSCAD).exists():
+            return None
+        out = self._built(path)
+        if out is None:
+            return None
         if out.exists() and out.stat().st_size > 0:
             return out
         try:
@@ -191,21 +232,15 @@ class ModelIndex:
 
     def compile_step(self, path: pathlib.Path, fine: bool = False) -> Optional[pathlib.Path]:
         """Convert a STEP file to binary STL, cached on its modification time."""
-        import hashlib
         import subprocess
 
         exe = self.step_python()
         if exe is None:
             self.last_error = "no Python with CadQuery to convert STEP"
             return None
-        try:
-            stamp = path.stat().st_mtime_ns
-        except OSError:
+        out = self._built(path, fine=fine)
+        if out is None:
             return None
-        key = hashlib.sha1(f"{path}:{stamp}".encode()).hexdigest()[:16]
-        cache = pathlib.Path(__file__).resolve().parent.parent / "build" / "step"
-        cache.mkdir(parents=True, exist_ok=True)
-        out = cache / f"{path.stem}-{key}{'-fine' if fine else ''}.stl"
         if out.exists() and out.stat().st_size > 0:
             return out
         script = pathlib.Path(__file__).resolve().parent / "step2stl.py"
@@ -238,8 +273,8 @@ class ModelIndex:
                 continue
         return None
 
-    def search(self, query: str, limit: int = 12,
-               sources: bool = False) -> List[Dict[str, object]]:
+    def search(self, query: str, limit: int = 12, sources: bool = False,
+               prefer: Optional[str] = None) -> List[Dict[str, object]]:
         """Rank models against a spoken or typed name."""
         words = [w for w in _NOISE.sub(" ", query.lower()).split() if len(w) > 1]
         if not words:
@@ -264,15 +299,15 @@ class ModelIndex:
             # Prefer the whole phrase, then a shorter name — "mite" should beat
             # "mite_packs_v3_old".
             exact = 2 if " ".join(words) in name else 0
-            # .scad is the authoring format; .step and .3mf are exports of it.
-            native = 2 if str(model.get("suffix", "")) == ".stl" else 1
+            native = _native(model, prefer)
             scored.append((exact, native, hits, -len(name), model))
         if not scored:
-            scored = self._fuzzy(words, sources=sources)
+            scored = self._fuzzy(words, sources=sources, prefer=prefer)
         scored.sort(key=lambda s: s[:4], reverse=True)
         return [s[4] for s in scored[:limit]]
 
-    def _fuzzy(self, words: List[str], sources: bool = False) -> List[tuple]:
+    def _fuzzy(self, words: List[str], sources: bool = False,
+               prefer: Optional[str] = None) -> List[tuple]:
         """Second pass for a name that was not said exactly.
 
         Only reached when nothing matched strictly, and deliberately narrow:
@@ -297,18 +332,18 @@ class ModelIndex:
                 ratio = difflib.SequenceMatcher(None, said, name).ratio()
             if ratio < 0.75:
                 continue
-            native = 2 if str(model.get("suffix", "")) == ".stl" else 1
+            native = _native(model, prefer)
             # Bucketed, because at this point every survivor is already a
             # plausible reading of what was said and the third decimal is
             # noise. A longer filename can out-score the thing it is a variant
             # of — "astro willie" scores astrowilly_site above astrowilly —
             # so a near-tie is settled by the tiebreakers instead: prefer the
-            # renderable STL, then the shortest name.
+            # format asked for (the renderable STL if none), then the shortest name.
             scored.append((0, round(ratio, 1), native, -len(name), model))
         return scored
 
-    def best(self, query: str) -> Optional[Dict[str, object]]:
-        hits = self.search(query, limit=1)
+    def best(self, query: str, prefer: Optional[str] = None) -> Optional[Dict[str, object]]:
+        hits = self.search(query, limit=1, prefer=prefer)
         return hits[0] if hits else None
 
     def best_source(self, query: str) -> Optional[Dict[str, object]]:
