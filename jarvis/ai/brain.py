@@ -228,8 +228,10 @@ class Brain:
             return self.status == "ready"
         self.status = "ready"
         self.detail = self._ollama_detail()
-        if self.status == "ready" or "not running" not in self.detail:
-            return self.status == "ready"
+        local_ok = self.status == "ready"
+        if local_ok or "not running" not in self.detail:
+            self._label()
+            return local_ok
         import shutil
         exe = shutil.which("ollama") or next((p for p in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama")
                                               if os.path.exists(p)), None)
@@ -247,7 +249,15 @@ class Brain:
             self.detail = await asyncio.to_thread(self._ollama_detail)
             if self.status == "ready" or "not running" not in self.detail:
                 break
-        return self.status == "ready"
+        local_ok = self.status == "ready"
+        self._label()
+        return local_ok
+
+    def _label(self) -> None:
+        """Keep the status line honest: Claude Code first when it is the main path."""
+        if self._smart_cmd and not self.detail.startswith("claude code"):
+            self.detail = f"claude code, fallback {self.detail}"
+            self.status = "ready"
 
     def _tools_and_system(self, kind: str):
         """The registry's tools plus any live ones, and the system prompt with

@@ -64,10 +64,23 @@ helpers, with no imports:
   copy(sel, dx, dy, dz), mirror(sel, plane="YZ", about=(0,0,0))
   cut(sel, tool), union(sel, tool)   tool: cq.Workplane solid (holes, bosses)
   fillet(sel, radius)                rounds every edge of the selected parts
+  revolve(name, profile, wall=None, axis="z", centre=(0, 0))
+                                     solid (or shell of thickness wall) of
+                                     revolution; profile = [(radius, height), ...]
+                                     along the axis, heights in the same
+                                     coordinates as the bboxes. USE THIS for any
+                                     round part; never build revolves by hand.
+  bell(name, r_throat, h_throat, r_exit, h_exit, wall=10, axis="z",
+       centre=(0, 0), bulge=0.35)     nozzle bell shell from throat to exit
+                                     (bulge 0 = straight cone)
 cq (CadQuery) and math are available. Filter selections with bbox() when a
 name pattern catches too much (for example only the parts below a joint).
-Keep joints connected: when you stretch or move one section, move what is
-attached to its free end with it. Return
+A replacement must occupy about the same space as what it replaces: take
+radii and heights from the bboxes of the parts you remove. Keep joints connected: when you stretch or move one section, move what is
+attached to its free end with it. In "say", name the part or parts you
+changed in plain words ("the inlet manifold ring at the nozzle exit"), so
+the user can tell at once if it was the wrong one. If more than one part
+fits the description, ask which. Return
   {"say": "...", "script": "<python>"}
 """.strip()
 

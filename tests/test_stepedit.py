@@ -67,6 +67,24 @@ check("saved file has the edit (tube now 150 long, top still at 0)",
 check("edit notes written", dest.with_suffix(".edits.txt").exists())
 
 check("undo", s.undo() and not s.scripts)
+
+# a replacement made with the bell helper sits where the removed parts were
+r = s.try_script("b = bbox('nozzle_tube_*')\ndelete('nozzle_tube_*')\n"
+                 "bell('nozzle_bell', 8, 0, 20, -100, wall=2, centre=(10, 0))")
+check("bell helper runs", r.get("ok"), str(r))
+boxes = next((n for v, n in r.get("touched", []) if v == "_boxes"), {})
+add = boxes.get("added") or [0] * 6
+check("bell stays on its axis and in its height range",
+      abs(add[2] + 100) < 1 and abs(add[5]) < 1 and add[3] - add[0] < 45, str(add))
+import importlib.util
+spec = importlib.util.spec_from_file_location("jm", pathlib.Path(__file__).resolve().parents[1] / "jarvis" / "main.py")
+jm = __import__("jarvis.main", fromlist=["x"])
+cls = [v for v in vars(jm).values() if isinstance(v, type) and hasattr(v, "_size_check")][0]
+flat = [["removed", ["a"]], ["added", ["b"]], ["_boxes", {"removed": [-560, -560, -1900, 560, 560, 0],
+                                                          "added": [-2030, -800, -2030, 2030, 900, 2030]}]]
+check("size check flags a flat 4 m disc replacing a 1.1 m nozzle", cls._size_check(flat) is not None)
+ok = [["_boxes", {"removed": [-560, -560, -1900, 560, 560, 0], "added": [-570, -570, -1900, 570, 570, 0]}]]
+check("size check passes a same-size replacement", cls._size_check(ok) is None)
 import shutil
 shutil.rmtree(tmp, ignore_errors=True)
 print("\n" + ("ALL PASS" if not FAILURES else f"{len(FAILURES)} FAILED:"))

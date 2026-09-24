@@ -114,6 +114,15 @@ class Edit:
     def __init__(self, parts, log):
         self.parts = parts
         self.log = log
+        self.touched = []      # (verb, [part names]) so JARVIS can say what changed
+
+    def _note(self, verb, idx):
+        self.touched.append([verb, [self.parts[i]["name"] for i in idx if i < len(self.parts)]])
+        if verb == "removed":
+            for i in idx:
+                b = self.parts[i]["shape"].BoundingBox()
+                self.removed_box = _grow(getattr(self, "removed_box", None),
+                                         (b.xmin, b.ymin, b.zmin, b.xmax, b.ymax, b.zmax))
 
     def _pick(self, sel):
         if isinstance(sel, int):
@@ -148,6 +157,7 @@ class Edit:
         idx = self._pick(sel)
         for i in idx:
             self.parts[i]["shape"] = self.parts[i]["shape"].translate(cq.Vector(dx, dy, dz))
+        self._note('moved', idx)
         self.log.append(f"moved {len(idx)} part(s) by ({dx:g}, {dy:g}, {dz:g})")
 
     def rotate(self, sel, axis="z", degrees=0.0, about=None):
@@ -161,6 +171,7 @@ class Edit:
         a = cq.Vector(*about)
         for i in idx:
             self.parts[i]["shape"] = self.parts[i]["shape"].rotate(a, a + cq.Vector(*d), degrees)
+        self._note('rotated', idx)
         self.log.append(f"rotated {len(idx)} part(s) {degrees:g} deg about {axis}")
 
     def scale(self, sel, factor, about=None):
@@ -195,10 +206,12 @@ class Edit:
         for i in idx:
             op = BRepBuilderAPI_GTransform(self.parts[i]["shape"].wrapped, g, True)
             self.parts[i]["shape"] = cq.Shape.cast(op.Shape())
+        self._note('stretched', idx)
         self.log.append(f"stretched {len(idx)} part(s) x{factor:g} along {axis}")
 
     def delete(self, sel):
         idx = set(self._pick(sel))
+        self._note("removed", sorted(idx))
         self.parts[:] = [p for i, p in enumerate(self.parts) if i not in idx]
         self.log.append(f"deleted {len(idx)} part(s)")
 
@@ -208,7 +221,55 @@ class Edit:
         if isinstance(shape, cq.Workplane):
             shape = shape.val()
         self.parts.append({"name": str(name), "shape": shape})
+        self.touched.append(["added", [str(name)]])
         self.log.append(f"added {name}")
+
+    def revolve(self, name, profile, wall=None, axis="z", centre=(0.0, 0.0)):
+        """A solid of revolution about an axis parallel to `axis` through
+        `centre` (the other two coordinates). `profile` is [(radius, height),
+        ...] along the axis, at least two points. With `wall`, a shell that
+        thick (inward from the profile) instead of a solid. Adds it and
+        returns its index."""
+        pts = [(float(r), float(h)) for r, h in profile]
+        if len(pts) < 2:
+            raise ValueError("revolve needs at least two (radius, height) points")
+        if wall:
+            outer = pts
+            inner = [(max(r - float(wall), 0.01), h) for r, h in reversed(pts)]
+            loop = outer + inner
+        else:
+            loop = [(0.0, pts[0][1])] + pts + [(0.0, pts[-1][1])]
+        # Sketch in the radius-height plane (XZ: local x = radius, local y = height),
+        # revolve about local y, which is global Z; then turn onto the axis asked for.
+        solid = (cq.Workplane("XZ").polyline(loop).close()
+                 .revolve(360, (0, 0, 0), (0, 1, 0)).val())
+        if axis == "x":
+            solid = solid.rotate(cq.Vector(0, 0, 0), cq.Vector(0, 1, 0), 90)
+            solid = solid.translate(cq.Vector(0, centre[0], centre[1]))
+        elif axis == "y":
+            solid = solid.rotate(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), -90)
+            solid = solid.translate(cq.Vector(centre[0], 0, centre[1]))
+        else:
+            solid = solid.translate(cq.Vector(centre[0], centre[1], 0))
+        self.parts.append({"name": str(name), "shape": solid})
+        self.touched.append(["added", [str(name)]])
+        self.log.append(f"revolved {name}")
+        return len(self.parts) - 1
+
+    def bell(self, name, r_throat, h_throat, r_exit, h_exit, wall=10.0, axis="z",
+             centre=(0.0, 0.0), steps=24, bulge=0.35):
+        """A nozzle bell as a shell of revolution: radius r_throat at height
+        h_throat opening to r_exit at h_exit (heights along `axis`, either
+        order), with the curved flank of a bell (bulge 0 = straight cone,
+        about 0.3-0.4 = a parabolic bell). Adds it and returns its index."""
+        prof = []
+        for k in range(steps + 1):
+            u = k / steps
+            h = h_throat + (h_exit - h_throat) * u
+            cone = r_throat + (r_exit - r_throat) * u
+            r = cone + bulge * (r_exit - r_throat) * math.sin(math.pi * u) * (1 - u) * 1.5
+            prof.append((r, h))
+        return self.revolve(name, prof, wall=wall, axis=axis, centre=centre)
 
     def copy(self, sel, dx=0.0, dy=0.0, dz=0.0, suffix="_copy"):
         for i in self._pick(sel):
@@ -221,6 +282,7 @@ class Edit:
         idx = self._pick(sel)
         for i in idx:
             self.parts[i]["shape"] = self.parts[i]["shape"].mirror(plane, cq.Vector(*about))
+        self._note('mirrored', idx)
         self.log.append(f"mirrored {len(idx)} part(s) in {plane}")
 
     def fillet(self, sel, radius):
@@ -229,6 +291,7 @@ class Edit:
         for i in idx:
             s = self.parts[i]["shape"]
             self.parts[i]["shape"] = s.fillet(radius, s.Edges())
+        self._note('rounded', idx)
         self.log.append(f"filleted {len(idx)} part(s) r{radius:g}")
 
     def cut(self, sel, tool):
@@ -238,6 +301,7 @@ class Edit:
         idx = self._pick(sel)
         for i in idx:
             self.parts[i]["shape"] = self.parts[i]["shape"].cut(tool)
+        self._note('cut', idx)
         self.log.append(f"cut {len(idx)} part(s)")
 
     def union(self, sel, tool):
@@ -246,7 +310,15 @@ class Edit:
         idx = self._pick(sel)
         for i in idx:
             self.parts[i]["shape"] = self.parts[i]["shape"].fuse(tool)
+        self._note('joined', idx)
         self.log.append(f"joined a shape to {len(idx)} part(s)")
+
+
+def _grow(box, b):
+    if box is None:
+        return list(b)
+    return [min(box[0], b[0]), min(box[1], b[1]), min(box[2], b[2]),
+            max(box[3], b[3]), max(box[4], b[4]), max(box[5], b[5])]
 
 
 # ------------------------------------------------------------------ safety
@@ -275,14 +347,23 @@ _SAFE_BUILTINS = {k: __builtins__[k] if isinstance(__builtins__, dict) else geta
                             "str", "bool", "reversed", "ValueError", "print")}
 
 
-def run_script(parts, script: str, log) -> None:
+def run_script(parts, script: str, log):
     check(script)
     ed = Edit(parts, log)
     env = {"__builtins__": _SAFE_BUILTINS, "cq": cq, "math": math, "parts": parts}
     for name in ("select", "names", "bbox", "move", "rotate", "scale", "stretch", "delete",
-                 "add", "copy", "mirror", "fillet", "cut", "union"):
+                 "add", "copy", "mirror", "fillet", "cut", "union", "revolve", "bell"):
         env[name] = getattr(ed, name)
     exec(compile(script, "<edit>", "exec"), env)
+    # Sizes for the host's sanity check: what was removed, what was added.
+    added = [n for verb, names in ed.touched if verb == "added" for n in names]
+    add_box = None
+    for p in parts:
+        if p["name"] in added:
+            b = p["shape"].BoundingBox()
+            add_box = _grow(add_box, (b.xmin, b.ymin, b.zmin, b.xmax, b.ymax, b.zmax))
+    ed.touched.append(["_boxes", {"removed": getattr(ed, "removed_box", None), "added": add_box}])
+    return ed.touched
 
 
 def export(parts, stl: str, step, tolerance: float, angular: float) -> None:
@@ -304,9 +385,10 @@ def main() -> int:
         elif req["cmd"] == "apply":
             parts = load_parts(req["src"])
             log = []
+            touched = []
             for n, script in enumerate(req.get("scripts") or []):
                 try:
-                    run_script(parts, script, log)
+                    touched = run_script(parts, script, log)
                 except Exception as exc:
                     print(json.dumps({"ok": False, "script": n,
                                       "error": f"{type(exc).__name__}: {exc}"[-600:],
@@ -314,7 +396,7 @@ def main() -> int:
                     return 0
             export(parts, req["stl"], req.get("step"), float(req.get("tolerance", 0.8)),
                    float(req.get("angular", 0.45)))
-            out = {"ok": True, "parts": len(parts), "log": log}
+            out = {"ok": True, "parts": len(parts), "log": log, "touched": touched}
         else:
             out = {"ok": False, "error": "unknown cmd"}
     except Exception as exc:

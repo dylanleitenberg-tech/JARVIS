@@ -80,8 +80,19 @@ class StepSession:
             label = f"{name}_* x{g['n']}" if g["n"] > 1 else g["names"][0]
             rows.append(f"{label}  bbox {g['bb']}")
         more = f"\n... and {len(groups) - limit} more groups" if len(groups) > limit else ""
+        box = inv["bbox"]
+        spans = [box[3] - box[0], box[4] - box[1], box[5] - box[2]]
+        k = spans.index(max(spans))
+        ax = "xyz"[k]
+        lo_parts = sorted(groups.items(), key=lambda g: g[1]["bb"][k])[:3]
+        hi_parts = sorted(groups.items(), key=lambda g: -g[1]["bb"][k + 3])[:3]
+        orient = (f"Orientation: the long axis is {ax} ({box[k]:.0f} to {box[k + 3]:.0f} mm). "
+                  f"Parts at the low-{ax} end: {', '.join(n for n, _ in lo_parts)}. "
+                  f"At the high-{ax} end: {', '.join(n for n, _ in hi_parts)}. The user sees the model "
+                  "turned by hand, so 'top' and 'bottom' are not reliable: read them relative to the "
+                  "part they name (the bottom of a nozzle is its open exit end).")
         return (f"{len(inv['parts'])} parts, overall bbox (xmin, ymin, zmin, xmax, ymax, zmax) "
-                f"{inv['bbox']} in mm:\n" + "\n".join(rows) + more)
+                f"{inv['bbox']} in mm.\n{orient}\n" + "\n".join(rows) + more)
 
     # ------------------------------------------------------------ edits
 

@@ -86,6 +86,7 @@ class Jarvis:
         self.step_edit = None                                  # StepSession for a STEP on screen
         self._modify_lock = asyncio.Lock()
         self._modify_pending: Optional[Dict[str, Any]] = None  # an edit waiting on an answer
+        self._smooth_pending: Optional[str] = None             # "smooth": render or reshape?
         self._cad_msg = ""
 
     # --------------------------------------------------------------- setup
@@ -706,6 +707,26 @@ class Jarvis:
         else:
             self.stat["text_utterances"] += 1
         await self.bus.publish("utterance", text=text, source=source)
+        self._activity("heard", text=text, source=source,
+                       shown=str(self._shown) if self._shown else None,
+                       pending=bool(self._cad_pending or self._modify_pending or self._smooth_pending))
+        # "Jarvis" on its own is the wake word arriving by itself; the request
+        # follows. It must not answer (and so cancel) a question JARVIS asked.
+        if not intents._ADDRESSED.sub("", text).strip(" ,.!?"):
+            return
+
+        # "Smooth" can mean two things; JARVIS asked which.
+        if self._smooth_pending:
+            pending, self._smooth_pending = self._smooth_pending, None
+            low = text.lower()
+            if re.search(r"\b(?:shape|surface|solid|geometry|reshape|replace|actual|real|cone|shell|model it|change it)\b", low):
+                self._activity("route", to="modify", why="smooth answer", request=pending)
+                self._spawn(self.modify_geometry(f"{pending} (the user means: change the geometry into a smooth surface)"), "geometry edit")
+                return
+            if re.search(r"\b(?:draw|render|look|display|shading|mesh|view|picture|visual)\b", low):
+                self._activity("route", to="smooth", why="smooth answer")
+                await self.smooth_model(speak=True)
+                return
 
         # JARVIS asked "lens width, lens height or lens radius?" and this is the answer.
         if self._cad_pending and await self._answer_cad_question(text, source):
@@ -714,10 +735,13 @@ class Jarvis:
         if self._modify_pending:
             pending, self._modify_pending = self._modify_pending, None
             if time.time() - pending["at"] < 90 and not intents.match(text):
-                asyncio.create_task(self.modify_geometry(f"{pending['request']} (answer to your question: {text})"))
+                self._activity("route", to="modify", why="answer to edit question", request=pending["request"])
+                self._spawn(self.modify_geometry(f"{pending['request']} (answer to your question: {text})"), "geometry edit")
                 return
 
         intent = intents.match(text)
+        self._activity("intent", text=text, intent=intent[0] if intent else None,
+                       args=intent[1] if intent else None)
         if intent is not None:
             action, args, ack = intent
 
@@ -791,6 +815,20 @@ class Jarvis:
                 return
 
             if action == "__model_smooth":
+                low = text.lower()
+                editable = self.step_edit is not None or self.cad_edit is not None
+                if editable and re.search(r"\b(?:instead of|as opposed to|rather than|not made of|out of)\b", low):
+                    self._activity("route", to="modify", why="smooth + instead of")
+                    self._spawn(self.modify_geometry(text), "geometry edit")
+                    return
+                names_a_part = not re.search(r"^(?:\W*(?:hey |ok |okay )?jarvis\W*)?(?:make |render |draw |show |turn )?"
+                                             r"(?:it|this|that)?\s*(?:look )?(?:smooth|smoother|higher detail|high detail|"
+                                             r"more detail|less faceted|finer)", low)
+                if editable and names_a_part:
+                    self._smooth_pending = text
+                    self._activity("ask", what="smooth: render or reshape")
+                    await self.say("Draw it smoother, or reshape it into a smooth surface?")
+                    return
                 await self.smooth_model(speak=True)
                 return
 
@@ -824,15 +862,65 @@ class Jarvis:
         # "Make the nozzle longer" with a STEP on screen: nothing to edit, and
         # silence (or a model with no idea what is on screen) is the worst answer.
         if self._fixed_geometry_request(text):
+            self._activity("route", to="modify" if self.step_edit else "explain", why="edit words on STEP/mesh")
             if self.step_edit is not None:
-                asyncio.create_task(self.modify_geometry(text))
+                self._spawn(self.modify_geometry(text), "geometry edit")
             else:
                 await self.say(self._fixed_geometry_line())
             return
 
         # Nothing matched locally — hand it to the model.
+        self._activity("route", to="brain", backend=self.brain.info().get("detail"))
         reply = await self.brain.ask(text)
+        self._activity("brain_reply", reply=reply)
         await self.say(reply)
+
+    # ------------------------------------------------------ background jobs
+
+    def _spawn(self, coro, label: str):
+        """Run a job in the background without losing it. A bare create_task is
+        held only weakly, and an exception inside it is dropped with nothing
+        said: a spoken edit that crashed simply never happened. Here the task
+        is kept until it finishes, and a failure is logged and said aloud."""
+        task = asyncio.create_task(coro)
+        if not hasattr(self, "_jobs"):
+            self._jobs = set()
+        self._jobs.add(task)
+
+        def done(t: asyncio.Task) -> None:
+            self._jobs.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                self._activity("job_failed", job=label, error=f"{type(exc).__name__}: {exc}")
+                asyncio.create_task(self.bus.publish("log", level="error",
+                                                     text=f"{label} failed: {type(exc).__name__}: {exc}"))
+                asyncio.create_task(self.say(f"That failed, Sir. {type(exc).__name__}."))
+        task.add_done_callback(done)
+        return task
+
+    # --------------------------------------------------------- activity log
+
+    def _activity(self, kind: str, **data: Any) -> None:
+        """One JSON line per thing heard, routed, asked, run or edited, in
+        logs/activity.log, so "it didn't do what I said" can be looked up
+        afterwards instead of guessed at. Kept to the last ~2 MB."""
+        try:
+            import pathlib
+            path = pathlib.Path(__file__).resolve().parents[1] / "logs" / "activity.log"
+            path.parent.mkdir(exist_ok=True)
+            if path.exists() and path.stat().st_size > 2_000_000:
+                path.write_text(path.read_text()[-1_000_000:])
+            with open(path, "a") as f:
+                clip = {k: (v[:1500] if isinstance(v, str) else v) for k, v in data.items()}
+                line = json.dumps(dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), kind=kind, **clip), default=str)
+                if len(line) > 8000:          # still whole JSON, just shorter
+                    line = json.dumps(dict(t=time.strftime("%Y-%m-%d %H:%M:%S"), kind=kind,
+                                           note="entry too long", keys=list(data)))
+                f.write(line + "\n")
+        except Exception:
+            pass
 
     # ------------------------------------------------------- live CAD edits
 
@@ -904,7 +992,7 @@ class Jarvis:
                                mode="step")
 
     def _schedule_rebuild(self, changed: Optional[str] = None) -> None:
-        asyncio.create_task(self._rebuild(changed))
+        self._spawn(self._rebuild(changed), "rebuild")
 
     async def _rebuild(self, changed: Optional[str] = None) -> None:
         if self.cad_edit is None and self.step_edit is not None:
@@ -960,7 +1048,7 @@ class Jarvis:
                 await self.say(line)
 
         if action == "__cad_modify":
-            asyncio.create_task(self.modify_geometry(str(args.get("request", "")), speak=speak))
+            self._spawn(self.modify_geometry(str(args.get("request", "")), speak=speak), "geometry edit")
             return True
         st = self.step_edit if self.cad_edit is None else None
         if st is not None and action in ("__cad_undo", "__cad_reset", "__cad_save"):
@@ -1103,6 +1191,8 @@ class Jarvis:
         async with self._modify_lock:
             await self.bus.publish("cad_building", name="edit")
             await self.say("Working on it.")
+            self._activity("modify_start", request=request,
+                           file_kind="scad" if self.cad_edit else "step" if self.step_edit else None)
             if self.cad_edit is not None:
                 line = await self._modify_scad(request)
             elif self.step_edit is not None:
@@ -1111,6 +1201,7 @@ class Jarvis:
                 line = self._fixed_geometry_line() if self._shown is not None else \
                     "Open a model first."
             await self.bus.publish("cad_done")
+            self._activity("modify_end", request=request, said=line)
             await self.say(line)
             return line
 
@@ -1122,6 +1213,7 @@ class Jarvis:
             if error:
                 payload.update(error=error, previous=previous)
             out = await self._claude_edit(payload)
+            self._activity("scad_edit", request=request, reply=out)
             if out.get("question"):
                 self._modify_pending = {"request": request, "at": time.time()}
                 return str(out.get("say") or "Which part do you mean?")
@@ -1177,19 +1269,72 @@ class Jarvis:
                 error, previous = "no script returned", ""
                 continue
             res = await asyncio.to_thread(st.try_script, script)
+            self._activity("step_script", request=request, script=script, ok=res.get("ok"),
+                           error=res.get("error"), touched=res.get("touched"))
+            problem = self._size_check(res.get("touched") or []) if res.get("ok") else None
+            if problem:
+                self._activity("size_check", problem=problem)
+                error, previous = problem, script
+                continue
             if res.get("ok"):
-                st.add(script, str(out.get("say") or ""), request)
+                touched = res.get("touched") or []
+                what = self._touched_line(touched)
+                st.add(script, (str(out.get("say") or "") + (f" [{what}]" if what else "")).strip(), request)
                 key = st.key()
                 await self.bus.publish("model_update", url=f"/api/model_edit?key={key}", dirty=True)
                 await self._publish_step_state()
-                return str(out.get("say") or "Done.")
+                # Spoken: Claude's sentence, which names the parts. The exact
+                # list of changed parts goes to the panel and the activity log.
+                said = str(out.get("say") or "Done.")
+                return re.split(r"(?<=[.!?])\s", said.strip(), maxsplit=1)[0]
             error, previous = str(res.get("error", "failed")), script
         return f"I could not make that change work. {str(error)[:140]}"
+
+    @staticmethod
+    def _size_check(touched) -> Optional[str]:
+        """A replacement that came out far larger than what it replaced is
+        almost always a wrong axis or wrong units (a nozzle bell revolved flat
+        came out 4 m wide). Returns the problem in numbers, or None."""
+        boxes = next((n for v, n in touched if v == "_boxes"), None)
+        if not boxes or not boxes.get("removed") or not boxes.get("added"):
+            return None
+        r, a = boxes["removed"], boxes["added"]
+        issues = []
+        for k, ax in enumerate("xyz"):
+            rs, as_ = r[k + 3] - r[k], a[k + 3] - a[k]
+            if as_ > rs * 1.25 + 20:
+                issues.append(f"{ax}: new part spans {as_:.0f} mm where the removed parts spanned {rs:.0f} mm")
+        if not issues:
+            return None
+        return ("The replacement is much bigger than what it replaced (" + "; ".join(issues) +
+                f"). Removed parts bbox {[round(v) for v in r]}, new part bbox {[round(v) for v in a]}. "
+                "Check the axis and the radii/heights and fix the script.")
+
+    @staticmethod
+    def _touched_line(touched) -> str:
+        """"Removed: eng rn inlet manifold exit." from the tool's record of which
+        named parts an edit changed, grouped (60 tubes are one line)."""
+        parts = []
+        for verb, names in touched or []:
+            if verb.startswith("_"):
+                continue
+            groups = []
+            for n in names:
+                g = re.sub(r"[_\-\s]*\d+$", "", n)
+                if g not in groups:
+                    groups.append(g)
+            if groups:
+                label = ", ".join(x.replace("_", " ") for x in groups[:3])
+                more = f" and {len(groups) - 3} more" if len(groups) > 3 else ""
+                count = f" ({len(names)} parts)" if len(names) > len(groups[:3]) else ""
+                parts.append(f"{verb.capitalize()}: {label}{more}{count}")
+        return "; ".join(parts)
 
     _EDIT_WORDS = re.compile(
         r"\b(?:make|set|change|increase|decrease|reduce|extend|lengthen|shorten|widen|narrow|"
         r"thicken|thin|resize|scale|move|reshape|modify|edit|round|fillet|chamfer|bigger|smaller|"
-        r"longer|shorter|wider|thicker|thinner)\b", re.I)
+        r"longer|shorter|wider|thicker|thinner|remove|delete|take off|get rid of|replace|instead|add|"
+        r"drill|hole|cut|fill|merge|split|turn into|convert|swap|flip|rotate|shift|extend)\b", re.I)
 
     def _fixed_geometry_request(self, text: str) -> bool:
         return (self.cad_edit is None and self._shown is not None and
@@ -1369,6 +1514,7 @@ class Jarvis:
         return specs, context
 
     async def _cad_tool_run(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        self._activity("tool", name=name, args=args)
         mapping = {
             "cad_set_dimension": ("__cad_set", {"param": args.get("name"), "value": args.get("value")}),
             "cad_change_dimension": ("__cad_nudge", {"param": args.get("name"),
@@ -1384,7 +1530,7 @@ class Jarvis:
             return {"ok": True, "result": await self.smooth_model(speak=False)}
         if name == "cad_modify":
             # Long: run it in the background and let the model say it has started.
-            asyncio.create_task(self.modify_geometry(str(args.get("request", ""))))
+            self._spawn(self.modify_geometry(str(args.get("request", ""))), "geometry edit")
             return {"ok": True, "result": "started; it takes 10-40 seconds and I will say when it is done"}
         if name not in mapping:
             return {"ok": False, "error": f"no such tool {name}"}
