@@ -99,17 +99,31 @@ def main() -> int:
     utterance = str(payload.get("text", "")).strip()
     tools = payload.get("tools") or []
 
-    catalogue = "\n".join(
-        f"  {t['name']}({', '.join((t.get('input_schema') or {}).get('properties', {}))})"
-        f" — {t['description']}"
-        for t in tools
-    ) or "  (none available)"
+    def signature(t: dict) -> str:
+        # Allowed values matter: without them "direction" came back as
+        # "increase" where the tool takes "bigger" or "smaller".
+        props = (t.get("input_schema") or {}).get("properties", {})
+        parts = []
+        for name, spec in props.items():
+            enum = spec.get("enum") if isinstance(spec, dict) else None
+            kind = spec.get("type", "") if isinstance(spec, dict) else ""
+            parts.append(f"{name}: {'|'.join(map(str, enum))}" if enum else f"{name}: {kind}".rstrip(": "))
+        return f"  {t['name']}({', '.join(parts)}) — {t['description']}"
 
-    system = "\n\n".join([
+    catalogue = "\n".join(signature(t) for t in tools) or "  (none available)"
+
+    # Each call is a fresh CLI conversation, so the last few exchanges ride
+    # along: "yes, do it" means nothing without the question before it.
+    history = payload.get("history") or []
+    recent = "\n".join(f"User: {h.get('user', '')}\nJ.A.R.V.I.S.: {h.get('reply', '')}"
+                       for h in history[-6:] if isinstance(h, dict))
+
+    system = "\n\n".join(filter(None, [
         payload.get("system") or "You are J.A.R.V.I.S.",
         PROTOCOL,
         "Available actions:\n" + catalogue,
-    ])
+        ("Conversation so far (most recent last):\n" + recent) if recent else "",
+    ]))
 
     # Run detached from whatever project the CLI would otherwise find. Without
     # this it loads the user's CLAUDE.md, settings and MCP servers: a question

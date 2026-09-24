@@ -371,6 +371,26 @@ built; a new build stops the one in flight.
 | "reset changes" | back to the file as saved |
 | "save" | writes the numbers into the `.scad` |
 
+When a name fits more than one dimension JARVIS asks instead of guessing:
+"make the lenses bigger" gets "lens width, lens height, or lens radius?", and
+the answer can be a name ("the height"), a position ("the first one"),
+several ("width and height") or "all of them". A describing word settles it
+when it can: "make the temples longer" can only mean temple length.
+
+Requests that are not a fixed phrase ("make the glasses fit a wider face",
+"how would I make the frame sturdier") go to Claude through your Claude Code
+login, with the part's dimensions and the last few exchanges, so "yes, do it"
+after its suggestion works. It answers in 3 to 8 seconds; a question gets an
+answer and an offer, and only a request changes the part. If Claude Code is
+not installed or does not answer, the local model (Ollama, started
+automatically) takes over. `ai.smart_backend: "off"` keeps everything local.
+
+"Make it smooth" (or "smoother", "higher detail", "less faceted") turns on
+smooth shading that keeps sharp edges sharp, and converts a STEP file again
+at finer detail: facets of 14 degrees instead of 26, 2.5 times the
+triangles, a few seconds. Asking to reshape a STEP or STL gets a plain
+answer: its shape is fixed here, and it can be turned, zoomed or smoothed.
+
 The file on disk is untouched until "save", which rewrites only the number on
 each changed line, keeps the comments, and first copies the original to
 `build/scad_backups/`. With no editable model open, "undo" and "save" are

@@ -31,7 +31,7 @@ def _num(text: str, default: int = 50) -> int:
 
 # A wake word at the front, with whatever punctuation follows it. Matches the
 # mishearings the config lists too, since those are what actually arrive.
-_ADDRESSED = re.compile(r"^(?:hey\s+|ok\s+|okay\s+|a\s+)?(?:jarvis|javis|jervis|jarvus)\b[\s,.:;!?-]*",
+_ADDRESSED = re.compile(r"^(?:hey\s+|ok\s+|okay\s+)?(?:jarvis|javis|jervis|jarvus)\b[\s,.:;!?-]*",
                         re.I)
 
 # (regex, builder) — the builder returns (action, args, acknowledgement).
@@ -50,11 +50,57 @@ def _is_model(name: str) -> bool:
 # or None. The edit rules only claim an utterance when this finds something,
 # so "lower the volume" still reaches the volume rule.
 param_lookup: Optional[Any] = None
+# spoken name -> (parameter, []) | (None, [options]) | (None, []). When a name
+# could mean several ("the lenses": width, height, radius) the rule asks.
+param_resolve: Optional[Any] = None
+
+
+def _target(name: str, kind: Optional[str] = None):
+    name = re.sub(r"^(?:the|its|that|this)\s+", "", name.strip(), flags=re.I)
+    if not name:
+        return None, []
+    if param_resolve:
+        p, options = param_resolve(name)
+    elif param_lookup:
+        p, options = param_lookup(name), []
+    else:
+        return None, []
+    if kind:
+        if p is not None and p.kind != kind:
+            p = None
+        options = [o for o in options if o.kind == kind]
+    return p, options
+
+
+# "Longer" can only mean a length: it settles "make the temples longer"
+# between temple length, height and thickness without asking.
+_ADJ_MEANS = {"longer": "length", "shorter": "length", "wider": "width", "narrower": "width",
+              "taller": "height", "higher": "height", "lower": "height", "thicker": "thickness",
+              "thinner": "thickness", "deeper": "depth", "shallower": "depth"}
+
+
+def _edit(action: str, name: str, args: Dict[str, Any], kind: Optional[str] = None,
+          adjective: str = "") -> Optional[Intent]:
+    """The edit for one parameter, a question when the name fits several, or
+    None so the utterance falls through to other rules and the model."""
+    p, options = _target(name, kind)
+    means = _ADJ_MEANS.get(adjective.lower())
+    if p is None and means and options:
+        fits = [o for o in options if means in getattr(o, "readable", o.name)]
+        if len(fits) == 1:
+            p = fits[0]
+        elif fits:
+            options = fits
+    if p is not None:
+        return (action, dict(args, param=p.name), "")
+    if len(options) >= 2:
+        return ("__cad_ask", {"action": action, "args": args,
+                              "options": [o.name for o in options], "said": name}, "")
+    return None
 
 
 def _param(name: str) -> Optional[Any]:
-    name = re.sub(r"^(?:the|its|that)\s+", "", name.strip(), flags=re.I)
-    return param_lookup(name) if (param_lookup and name) else None
+    return _target(name)[0]
 
 
 def rule(pattern: str):
@@ -64,6 +110,19 @@ def rule(pattern: str):
         RULES.append((compiled, fn))
         return fn
     return wrap
+
+
+# ------------------------------------------------------------ smoothing
+
+@rule(r"^(?:make|render|draw|show|turn)\s+(?:it|this|that|the\s+.+?|.+?)\s+(?:smooth|smoother|less\s+(?:faceted|blocky|jagged|choppy)"
+      r"|high(?:er)?[- ]?(?:detail|res(?:olution)?|quality)|more detailed|finer)[.!]?$")
+def _smooth(m) -> Optional[Intent]:
+    return ("__model_smooth", {}, "")
+
+
+@rule(r"^(?:smooth|smoothen)(?:\s+(?:it|this|that|out|the\s+.+?))*(?:\s+out)?[.!]?$|^(?:more|higher|high)\s+detail[.!]?$")
+def _smooth_short(m) -> Optional[Intent]:
+    return ("__model_smooth", {}, "")
 
 
 # -------------------------------------------------------- live CAD edits
@@ -83,48 +142,37 @@ def _amount(num: Optional[str], unit: Optional[str]) -> Dict[str, Any]:
 
 @rule(r"^(?:set|make|change|put)\s+(.+?)\s+(?:to|at|equal to|equals|=)\s+(-?\d+(?:\.\d+)?)" + _UNIT + r"[.!]?$")
 def _cad_set(m) -> Optional[Intent]:
-    p = _param(m.group(1))
-    return ("__cad_set", {"param": p.name, "value": float(m.group(2))}, "") if p else None
+    return _edit("__cad_set", m.group(1), {"value": float(m.group(2))})
 
 
 @rule(r"^(?:turn|switch)\s+(on|off)\s+(.+?)[.!]?$")
 def _cad_bool_a(m) -> Optional[Intent]:
-    p = _param(m.group(2))
-    return ("__cad_bool", {"param": p.name, "on": m.group(1).lower() == "on"}, "") \
-        if p is not None and p.kind == "bool" else None
+    return _edit("__cad_bool", m.group(2), {"on": m.group(1).lower() == "on"}, kind="bool")
 
 
 @rule(r"^(?:turn|switch)\s+(.+?)\s+(on|off)[.!]?$")
 def _cad_bool_b(m) -> Optional[Intent]:
-    p = _param(m.group(1))
-    return ("__cad_bool", {"param": p.name, "on": m.group(2).lower() == "on"}, "") \
-        if p is not None and p.kind == "bool" else None
+    return _edit("__cad_bool", m.group(1), {"on": m.group(2).lower() == "on"}, kind="bool")
 
 
 @rule(r"^(?:make|set|get)\s+(.+?)\s+(?:a\s+(?:bit|little)\s+)?(" + _UP + "|" + _DOWN + r")"
       r"(?:\s+by\s+(\d+(?:\.\d+)?)" + _UNIT + r")?[.!]?$")
 def _cad_make(m) -> Optional[Intent]:
-    p = _param(m.group(1))
-    if p is None:
-        return None
     up = re.fullmatch(_UP, m.group(2).lower()) is not None
-    return ("__cad_nudge", dict({"param": p.name, "up": up}, **_amount(m.group(3), m.group(4))), "")
+    return _edit("__cad_nudge", m.group(1), dict({"up": up}, **_amount(m.group(3), m.group(4))),
+                 adjective=m.group(2))
 
 
 @rule(r"^(increase|raise|grow|bump up|bump|extend|decrease|reduce|lower|shrink|cut|trim)\s+(.+?)"
       r"(?:\s+by\s+(\d+(?:\.\d+)?)" + _UNIT + r")?[.!]?$")
 def _cad_verb(m) -> Optional[Intent]:
-    p = _param(m.group(2))
-    if p is None:
-        return None
     up = m.group(1).lower() in ("increase", "raise", "grow", "bump up", "bump", "extend")
-    return ("__cad_nudge", dict({"param": p.name, "up": up}, **_amount(m.group(3), m.group(4))), "")
+    return _edit("__cad_nudge", m.group(2), dict({"up": up}, **_amount(m.group(3), m.group(4))))
 
 
 @rule(r"^(?:adjust|tweak|grab|drag)\s+(.+?)[.!]?$")
 def _cad_adjust(m) -> Optional[Intent]:
-    p = _param(m.group(1))
-    return ("__cad_adjust", {"param": p.name}, "") if p else None
+    return _edit("__cad_adjust", m.group(1), {})
 
 
 @rule(r"^(?:undo|undo that|take that back)[.!]?$")

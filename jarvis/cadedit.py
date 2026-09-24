@@ -56,9 +56,14 @@ class Param:
         s = re.sub(r"([a-z])([A-Z])", r"\1 \2", self.name)
         return re.sub(r"[_\s]+", " ", s).strip().lower()
 
+    @property
+    def readable(self) -> str:
+        """For saying aloud: lens_w -> "lens width", ear_bend_deg -> "ear bend angle"."""
+        return " ".join(_READ.get(w, w) for w in self.spoken.split())
+
     def to_dict(self, current: object) -> Dict[str, object]:
         lo, hi, step = self.bounds()
-        return {"name": self.name, "spoken": self.spoken, "kind": self.kind,
+        return {"name": self.name, "spoken": self.readable, "kind": self.kind,
                 "value": current, "base": self.value, "comment": self.comment,
                 "lo": lo, "hi": hi, "step": step}
 
@@ -75,6 +80,45 @@ class Param:
         lo, hi = (0.0, v * 3) if v > 0 else (v * 3, 0.0)
         step = 1.0 if self.kind == "int" else _nice_step(abs(v) / 50)
         return lo, hi, step
+
+
+# How dimensions are abbreviated in variable names, read back as words.
+_ABBREV = {
+    "t": ("thickness", "thick", "wall"), "th": ("thickness", "thick"),
+    "w": ("width", "wide"), "wd": ("width",), "h": ("height", "high", "tall"),
+    "l": ("length", "long"), "len": ("length", "long"), "lg": ("length",),
+    "r": ("radius", "round", "corner"), "rad": ("radius",),
+    "d": ("diameter", "dia"), "dia": ("diameter",), "od": ("outer", "outside", "diameter"),
+    "id": ("inner", "inside", "diameter"), "deg": ("angle", "degrees", "degree"),
+    "ang": ("angle",), "a": ("angle",), "n": ("count", "number"), "num": ("count", "number"),
+    "clr": ("clearance", "gap"), "gap": ("clearance", "spacing"), "pcd": ("pitch", "circle"),
+    "x": ("x",), "y": ("y",), "z": ("z", "height"), "pos": ("position",), "off": ("offset",),
+    "ipd": ("pupil", "pupillary", "interpupillary", "eye", "distance"),
+}
+_READ = {"t": "thickness", "th": "thickness", "w": "width", "h": "height", "l": "length",
+         "len": "length", "r": "radius", "rad": "radius", "d": "diameter", "dia": "diameter",
+         "od": "outer diameter", "id": "inner diameter", "deg": "angle", "ang": "angle",
+         "n": "count", "num": "count", "clr": "clearance", "ipd": "I P D", "pcd": "bolt circle",
+         "off": "offset", "pos": "position"}
+_FILLER = {"of", "the", "a", "an", "and", "its", "it", "on", "for", "to"}
+
+
+def _singular(w: str) -> str:
+    if len(w) > 4 and w.endswith("es") and w[-3] in "sxz":
+        return w[:-2]
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss") and w[:-1] not in _ABBREV:
+        return w[:-1]                 # but "lens" is not the plural of "len"
+    return w
+
+
+def _same(a: str, b: str) -> bool:
+    """Equal, or one is the start of the other and both are real words:
+    "pantoscopic" and "panto", "temple" and "temples". Never on one letter."""
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 4:       # "len" is not the start of "lens"
+        return False
+    return a.startswith(b) or b.startswith(a)
 
 
 def _nice_step(x: float) -> float:
@@ -165,29 +209,54 @@ class EditSession:
 
     # ------------------------------------------------------------ lookup
 
-    def find(self, spoken: str) -> Optional[Param]:
-        """Match a spoken name to a parameter: exact, then word overlap, then
-        closest spelling ("rim thickness" finds rim_t, "wall" finds wall_t)."""
+    def candidates(self, spoken: str, among: Optional[List["Param"]] = None) -> List[Tuple["Param", float]]:
+        """Parameters a spoken name could mean, best first, with scores.
+        An exact name scores 2. CAD abbreviations are read as words, so
+        "rim thickness" finds rim_t and "ear bend angle" finds ear_bend_deg."""
         want = re.sub(r"[_\s]+", " ", spoken.lower()).strip()
-        want = re.sub(r"^(?:the|a)\s+", "", want)
-        if not want or not self.params:
-            return None
+        want = re.sub(r"^(?:the|a|an|its|that|this)\s+", "", want)
+        pool = among if among is not None else self.params
+        if not want or not pool:
+            return []
         squash = want.replace(" ", "")
-        for p in self.params:
+        qwords = [_singular(w) for w in want.split() if w not in _FILLER]
+        scored = []
+        for p in pool:
             if p.spoken == want or p.name.lower() == squash:
-                return p
-        words = set(want.split())
-        best, score = None, 0.0
-        for p in self.params:
-            pw = set(p.spoken.split())
-            # "rim thickness" vs "rim t": a word may be a prefix of the other.
-            hits = sum(1 for w in words if any(x == w or (len(x) >= 1 and w.startswith(x)) or
-                                               (len(w) >= 3 and x.startswith(w)) for x in pw))
-            s = hits / max(len(words), len(pw))
-            s = max(s, difflib.SequenceMatcher(None, want, p.spoken).ratio() * 0.9)
-            if s > score:
-                best, score = p, s
-        return best if score >= 0.5 else None
+                scored.append((p, 2.0))
+                continue
+            pwords = p.spoken.split()
+            vocab = set(pwords) | {x for w in pwords for x in _ABBREV.get(w, ())}
+            hits = sum(1 for q in qwords if any(_same(q, v) for v in vocab))
+            if not qwords:
+                continue
+            covered = sum(1 for w in pwords if any(_same(q, w) or q in _ABBREV.get(w, ())
+                                                    for q in qwords))
+            score = (hits / len(qwords)) * (0.75 + 0.25 * covered / len(pwords))
+            # a mishearing still lands: "rim thickniss", "panto tilt"
+            score = max(score, difflib.SequenceMatcher(None, want, p.spoken).ratio() * 0.8)
+            if score >= 0.5:
+                scored.append((p, score))
+        scored.sort(key=lambda t: -t[1])
+        return scored
+
+    def resolve(self, spoken: str, among: Optional[List["Param"]] = None
+                ) -> Tuple[Optional["Param"], List["Param"]]:
+        """(the parameter, []) when the name is clear; (None, options) when it
+        could be several ("the lenses": width, height or radius); (None, [])
+        when nothing is close."""
+        ranked = self.candidates(spoken, among)
+        if not ranked:
+            return None, []
+        top = ranked[0][1]
+        close = [p for p, s in ranked if top - s < 0.03]
+        if top >= 2.0 or len(close) == 1:
+            return ranked[0][0], []
+        return None, close[:4]
+
+    def find(self, spoken: str) -> Optional[Param]:
+        """The parameter only when the name is unambiguous."""
+        return self.resolve(spoken)[0]
 
     def current(self, name: str) -> object:
         return self.overrides.get(name, self.by_name[name].value)
@@ -204,7 +273,7 @@ class EditSession:
         elif p.kind == "int":
             value = int(round(float(value)))
         else:
-            value = float(value)
+            value = float(f"{float(value):.6g}")      # 55.00000000000001 -> 55.0
         if value == self.current(name):
             return value
         # A drag sends a stream of values for one dimension: that is one edit,

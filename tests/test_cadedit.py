@@ -113,9 +113,34 @@ says("adjust the width", "__cad_adjust", param="width")
 says("undo", "__cad_undo")
 says("save changes", "__cad_save")
 says("what can i change", "__cad_params")
-says("a jarvis set width to 30", "__cad_set", param="width", value=30.0)
+says("hey jarvis set width to 30", "__cad_set", param="width", value=30.0)
 check("volume still reaches volume", intents.match("set volume to 50")[0] == "set_volume")
 check("lower the volume is not an edit", intents.match("lower the volume") is None)
+
+# ambiguous names ask instead of guessing
+g = tmp / "glasses.scad"
+g.write_text("lens_w = 50;\nlens_h = 40;\nlens_r = 9;\nrim_t = 3.5;\ntemple_len = 132;\n"
+             "ear_bend_deg = 50;\npanto_tilt = 8;\ncube([lens_w, lens_h, rim_t]);\n")
+gs = cadedit.EditSession(g, OPENSCAD)
+p, opts = gs.resolve("the lenses")
+check("'the lenses' is ambiguous", p is None and {o.name for o in opts} == {"lens_w", "lens_h", "lens_r"},
+      str([o.name for o in opts]))
+check("'lens' does not match temple length", "temple_len" not in [o.name for o in gs.resolve("lens")[1]])
+check("'rim thickness' is clear", gs.resolve("rim thickness")[0].name == "rim_t")
+check("'tilt' is clear (no one-letter matches)", gs.resolve("tilt")[0].name == "panto_tilt")
+check("'ear bend angle' reads deg as angle", gs.resolve("ear bend angle")[0].name == "ear_bend_deg")
+check("readable names", gs.by_name["lens_w"].readable == "lens width" and gs.by_name["rim_t"].readable == "rim thickness")
+intents.param_resolve = gs.resolve
+got = intents.match("make the lenses bigger")
+check("ambiguous edit becomes a question", got and got[0] == "__cad_ask" and got[1]["action"] == "__cad_nudge"
+      and set(got[1]["options"]) == {"lens_w", "lens_h", "lens_r"}, str(got))
+check("clear edit still edits", intents.match("set rim thickness to 4")[0] == "__cad_set")
+g2 = intents.match("make the temples longer")
+check("'longer' settles which temple dimension", g2 and g2[0] == "__cad_nudge" and g2[1]["param"] == "temple_len", str(g2))
+check("'a' is not a wake word", intents.match("a set rim thickness to 4") is None or
+      intents.match("a set rim thickness to 4")[0] != "__cad_set")
+check("smooth phrase", intents.match("make the rear engine nozzle smooth")[0] == "__model_smooth")
+intents.param_resolve = None
 
 shutil.rmtree(tmp, ignore_errors=True)
 print("\n" + ("ALL PASS" if not FAILURES else f"{len(FAILURES)} FAILED:"))

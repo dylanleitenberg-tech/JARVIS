@@ -19,6 +19,7 @@ import atexit
 import contextlib
 import errno
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -50,6 +51,8 @@ class Jarvis:
         self.bus = Bus()
         self.dispatcher = Dispatcher(cfg, self.bus)
         self.brain = Brain(cfg, self.bus, self.dispatcher)
+        self.brain.extra_tools = self._cad_tools
+        self.brain.extra_run = self._cad_tool_run
         self.gestures = None
         self.vision = None
         self.server: Optional[Server] = None
@@ -76,6 +79,10 @@ class Jarvis:
         # Live parameter editing of the .scad model on screen (cadedit.py).
         self.cad_edit = None
         intents.param_lookup = lambda name: self.cad_edit.find(name) if self.cad_edit else None
+        intents.param_resolve = lambda name: self.cad_edit.resolve(name) if self.cad_edit else (None, [])
+        self._cad_pending: Optional[Dict[str, Any]] = None     # a question JARVIS asked
+        self._shown = None                                     # path of the model on screen
+        self._cad_msg = ""
 
     # --------------------------------------------------------------- setup
 
@@ -136,6 +143,10 @@ class Jarvis:
             print( "    or start here  ./jarvis-run --replace\n")
             return
         self._hud_url = url
+        # A local model that is not running is the usual reason anything but a
+        # fixed phrase goes unanswered. Start it now, not at the first question.
+        if getattr(self.brain, "_local", False):
+            await self.brain.ensure_local()
 
         # A backstop for the exits that do not run the shutdown path: an
         # unhandled exception, sys.exit from somewhere else, a parent that
@@ -692,6 +703,10 @@ class Jarvis:
             self.stat["text_utterances"] += 1
         await self.bus.publish("utterance", text=text, source=source)
 
+        # JARVIS asked "lens width, lens height or lens radius?" and this is the answer.
+        if self._cad_pending and await self._answer_cad_question(text, source):
+            return
+
         intent = intents.match(text)
         if intent is not None:
             action, args, ack = intent
@@ -748,6 +763,13 @@ class Jarvis:
                 await self.say(ack)
                 asyncio.create_task(self.power_down())
                 return
+            if action == "__confirm" and not getattr(self.dispatcher, "pending", None) and \
+                    self.brain.cmd_history and self.brain.cmd_history[-1]["reply"].rstrip().endswith("?"):
+                # "Yes, do it" answers the question the model just asked, not a
+                # confirmation gate: it goes back to the model with that context.
+                reply = await self.brain.ask(text)
+                await self.say(reply)
+                return
             if action == "__confirm":
                 result = await self.dispatcher.confirm_pending(bool(args["accept"]))
                 if result.get("cancelled"):
@@ -756,6 +778,10 @@ class Jarvis:
                     await self.say("Done.")
                 elif result.get("error"):
                     await self.say("Nothing was waiting on you, Sir.")
+                return
+
+            if action == "__model_smooth":
+                await self.smooth_model(speak=True)
                 return
 
             if action.startswith("__cad_") and action not in ("__cad_fit",):
@@ -785,6 +811,12 @@ class Jarvis:
             await self.say(ack or self.summarise(action, result.get("result")))
             return
 
+        # "Make the nozzle longer" with a STEP on screen: nothing to edit, and
+        # silence (or a model with no idea what is on screen) is the worst answer.
+        if self._fixed_geometry_request(text):
+            await self.say(self._fixed_geometry_line())
+            return
+
         # Nothing matched locally — hand it to the model.
         reply = await self.brain.ask(text)
         await self.say(reply)
@@ -804,6 +836,7 @@ class Jarvis:
         from .cadedit import EditSession
         from .models import OPENSCAD
         path = self.models.resolve(raw_path) if raw_path else None
+        self._shown = path
         if path is None or path.suffix.lower() != ".scad" or not pathlib.Path(OPENSCAD).exists():
             self.cad_edit = None
             await self.bus.publish("cad_params", path=None, params=[], dirty=False)
@@ -850,16 +883,24 @@ class Jarvis:
             return str(int(value))
         return f"{float(value):.4g}"
 
-    async def cad_action(self, action: str, args: Dict[str, Any], source: str) -> bool:
+    async def cad_action(self, action: str, args: Dict[str, Any], source: str,
+                         speak: bool = True) -> bool:
         """Voice edits to the model on screen. Returns False to let the
-        utterance fall through when there is nothing to edit."""
+        utterance fall through when there is nothing to edit. With speak=False
+        (the model calling it as a tool) the line is kept in self._cad_msg for
+        the model to report instead of being said twice."""
+        async def tell(line: str) -> None:
+            self._cad_msg = line
+            if speak:
+                await self.say(line)
+
         s = self.cad_edit
         if action == "__cad_undo":
             if s and s.undo():
                 self._schedule_rebuild()
-                await self.say("Undone.")
+                await tell("Undone.")
             elif s:
-                await self.say("Nothing to undo.")
+                await tell("Nothing to undo.")
             else:
                 await self.dispatcher.run("press_key", {"combo": "cmd+z"}, source=source)
             return True
@@ -868,46 +909,62 @@ class Jarvis:
                 await self.dispatcher.run("press_key", {"combo": "cmd+s"}, source=source)
                 return True
             if not s.overrides:
-                await self.say("Nothing has changed.")
+                await tell("Nothing has changed.")
                 return True
             try:
                 backup = await asyncio.to_thread(s.save)
             except (OSError, RuntimeError) as exc:
-                await self.say(f"Not saved. {exc}"[:160])
+                await tell(f"Not saved. {exc}"[:160])
                 return True
             await self.bus.publish("cad_params", path=str(s.path), name=s.path.stem,
                                    params=s.state(), dirty=False)
             await self.bus.publish("log", level="info",
                                    text=f"saved {s.path.name}; original kept at {backup}")
-            await self.say(f"Saved to {s.path.name}. The original is backed up.")
+            await tell(f"Saved to {s.path.name}. The original is backed up.")
             return True
         if s is None:
-            await self.say("Open an OpenSCAD model first. Its dimensions are what I can change.")
+            await tell("Open an OpenSCAD model first. Its dimensions are what I can change.")
             return True
         if action == "__cad_reset":
             s.reset()
             self._schedule_rebuild()
-            await self.say("Back to the file as saved.")
+            await tell("Back to the file as saved.")
             return True
         if action == "__cad_params":
             await self.bus.publish("cad_panel", open=True)
-            names = [p.spoken for p in s.params[:5]]
-            more = f", and {len(s.params) - 5} more" if len(s.params) > 5 else ""
-            await self.say(f"{len(s.params)} dimensions. {', '.join(names)}{more}." if s.params
-                           else "This file has no plain numbers to change.")
+            names = [p.readable for p in s.params[:5]]
+            more = f", and {len(s.params) - 5} more on the panel" if len(s.params) > 5 else ""
+            await tell(f"{len(s.params)} dimensions. {', '.join(names)}{more}." if s.params
+                       else "This file has no plain numbers to change.")
             return True
         if action == "__cad_done":
             await self.bus.publish("cad_select", name=None)
-            await self.say("Done.")
+            await tell("Done.")
+            return True
+        if action == "__cad_ask":
+            options = [s.by_name[n] for n in args.get("options", []) if n in s.by_name]
+            if len(options) < 2:
+                return False
+            self._cad_pending = {"action": args["action"], "args": dict(args.get("args") or {}),
+                                 "options": [o.name for o in options], "at": time.time()}
+            await self.bus.publish("cad_ask", options=[o.name for o in options])
+            said = ", ".join(o.readable for o in options[:-1]) + f", or {options[-1].readable}"
+            await tell(f"Which one: {said}?" if len(options) > 2 else
+                       f"{options[0].readable} or {options[1].readable}?")
             return True
 
-        p = s.find(str(args.get("param", "")))
+        p = s.by_name.get(str(args.get("param", ""))) or s.find(str(args.get("param", "")))
         if p is None:
-            await self.say(f"There is no {args.get('param', 'such')} in this part.")
+            _, options = s.resolve(str(args.get("param", "")))
+            if len(options) >= 2 and speak:
+                return await self.cad_action("__cad_ask", {"action": action, "args": {
+                    k: v for k, v in args.items() if k != "param"}, "options": [o.name for o in options]},
+                    source, speak)
+            await tell(f"There is no {args.get('param', 'such')} in this part.")
             return True
         if action == "__cad_adjust":
             await self.bus.publish("cad_select", name=p.name)
-            await self.say(f"{p.spoken}. Pinch and move your hand up or down.")
+            await tell(f"{p.readable}. Pinch and move your hand up or down.")
             return True
         try:
             if action == "__cad_set":
@@ -919,12 +976,202 @@ class Jarvis:
                                 bool(args.get("percent")))
             else:
                 return False
-        except (TypeError, ValueError):
-            await self.say("I could not read that number.")
+        except (TypeError, ValueError, KeyError):
+            await tell("I could not read that number.")
             return True
         self._schedule_rebuild(p.name)
-        await self.say(f"{p.spoken}, {self._say_value(p, value)}.")
+        await tell(f"{p.readable}, {self._say_value(p, value)}.")
         return True
+
+    _EDIT_WORDS = re.compile(
+        r"\b(?:make|set|change|increase|decrease|reduce|extend|lengthen|shorten|widen|narrow|"
+        r"thicken|thin|resize|scale|move|reshape|modify|edit|round|fillet|chamfer|bigger|smaller|"
+        r"longer|shorter|wider|thicker|thinner)\b", re.I)
+
+    def _fixed_geometry_request(self, text: str) -> bool:
+        return (self.cad_edit is None and self._shown is not None and
+                self._shown.suffix.lower() in (".step", ".stp", ".stl", ".obj") and
+                bool(self._EDIT_WORDS.search(text)))
+
+    def _fixed_geometry_line(self) -> str:
+        kind = "a STEP export" if self._shown.suffix.lower() in (".step", ".stp") else "a mesh"
+        return (f"{self._shown.stem.replace('_', ' ')} is {kind}, so its shape is fixed here. "
+                "I can turn it, zoom it, or make it smooth. To reshape it, change it in the CAD "
+                "program and export again.")
+
+    async def smooth_model(self, speak: bool = True) -> str:
+        """Smooth shading for whatever is on screen; a STEP is also converted
+        again at finer detail (2.5 times the triangles, a few seconds)."""
+        path = self._shown
+        if path is None:
+            line = "There is no model on screen."
+            if speak:
+                await self.say(line)
+            return line
+        name = path.stem.replace("_", " ")
+        if path.suffix.lower() in (".step", ".stp"):
+            if speak:
+                await self.say(f"Smoothing the {name}. The finer mesh takes a few seconds.")
+            out = await asyncio.to_thread(self.models.renderable, str(path), True)
+            if out is None:
+                line = f"The finer conversion failed. {getattr(self.models, 'last_error', '')}"[:160]
+                await self.say(line)
+                return line
+            import urllib.parse
+            url = "/api/model?detail=fine&path=" + urllib.parse.quote(str(path))
+            await self.bus.publish("model_update", url=url, smooth=True)
+            return f"{name} smoothed at finer detail"
+        await self.bus.publish("model_update", url=None, smooth=True)
+        line = f"{name}, smooth shading."
+        if speak:
+            await self.say(line)
+        return line
+
+    _ORDINALS = {"first": 0, "one": 0, "1": 0, "second": 1, "two": 1, "2": 1, "third": 2,
+                 "three": 2, "3": 2, "fourth": 3, "four": 3, "4": 3}
+
+    async def _answer_cad_question(self, text: str, source: str) -> bool:
+        """Apply the question's edit to what the answer names: one option by
+        name ("the height"), by position ("the second one"), several ("width
+        and height"), or all of them ("both", "all of them"). Anything else
+        drops the question and is handled as a new request."""
+        pending, self._cad_pending = self._cad_pending, None
+        s = self.cad_edit
+        if s is None or time.time() - pending["at"] > 45:
+            return False
+        answer = intents._ADDRESSED.sub("", text.strip().strip(".,!?").lower()).strip()
+        if re.match(r"^(?:no|never ?mind|cancel|forget it|neither|none)\b", answer):
+            await self.say("Left as it is.")
+            return True
+        options = [s.by_name[n] for n in pending["options"] if n in s.by_name]
+        chosen = []
+        # Names first: "width and height", "both the width and the height".
+        named = re.sub(r"\b(?:both|all|each|every|of|them|the|ones?|please|just)\b", " ", answer)
+        for part in re.split(r"\s*(?:,|\band\b|\bplus\b|\bor\b)\s*", named):
+            part = part.strip()
+            if not part:
+                continue
+            p, _ = s.resolve(part, among=options)
+            if p is None:
+                ranked = s.candidates(part, among=options)
+                p = ranked[0][0] if ranked and (len(ranked) == 1 or ranked[0][1] - ranked[1][1] > 0.05) else None
+            if p is not None and p not in chosen:
+                chosen.append(p)
+        if not chosen:
+            if re.search(r"\bboth\b", answer):
+                if len(options) == 2:
+                    chosen = options
+                else:
+                    self._cad_pending = dict(pending, at=time.time())
+                    await self.say("Which two: " + ", ".join(o.readable for o in options[:-1]) +
+                                   f", or {options[-1].readable}?")
+                    return True
+            elif re.search(r"\b(?:all|each|every|all of them|all three|all four)\b", answer):
+                chosen = options
+            elif re.search(r"\blast\b", answer):
+                chosen = [options[-1]]
+            elif len(answer.split()) <= 4:
+                for word, i in self._ORDINALS.items():
+                    if re.search(rf"\b{word}\b", answer) and i < len(options):
+                        chosen = [options[i]]
+                        break
+        if not chosen:
+            return False                       # not an answer: treat as a new request
+        lines = []
+        for p in chosen:
+            self._cad_msg = ""
+            await self.cad_action(pending["action"], dict(pending["args"], param=p.name), source, speak=False)
+            if self._cad_msg:
+                lines.append(self._cad_msg.rstrip("."))
+        await self.say(("; ".join(lines) + ".") if lines else "Done.")
+        return True
+
+    # The model gets these while an editable part is on screen, with the part's
+    # dimensions in its instructions, so "make the glasses fit a wider face" can
+    # become the right edits, or a question if it cannot tell.
+    def _cad_tools(self):
+        s = self.cad_edit
+        smooth = {"name": "model_smooth",
+                  "description": "Render the model on screen smoother: smooth shading, and for a STEP "
+                                 "file a finer conversion. Use for smooth, less faceted, higher detail.",
+                  "input_schema": {"type": "object", "properties": {}}}
+        if self._shown is None:
+            return [], ""
+        if s is None or not s.params:
+            return [smooth], (
+                f"The user has '{self._shown.stem}' ({self._shown.name}) open in the model viewer. "
+                "It is finished geometry (STEP or mesh) with no dimensions to edit here. If asked to "
+                "reshape it, say so in one sentence and offer to make it smooth; for smooth, less "
+                "faceted or higher detail, call model_smooth.")
+        name = {"type": "string", "description": "exact dimension name from the list"}
+        specs = [
+            {"name": "cad_set_dimension", "description": "Set one dimension of the model on screen to a value.",
+             "input_schema": {"type": "object", "properties": {"name": name, "value": {"type": "number"}},
+                              "required": ["name", "value"]}},
+            {"name": "cad_change_dimension",
+             "description": "Make one dimension bigger or smaller: by an amount in the model's units, "
+                            "by a percentage, or by 10% if no amount is given.",
+             "input_schema": {"type": "object", "properties": {
+                 "name": name, "direction": {"type": "string", "enum": ["bigger", "smaller"]},
+                 "amount": {"type": "number"}, "percent": {"type": "boolean"}},
+                 "required": ["name", "direction"]}},
+            {"name": "cad_toggle", "description": "Switch a true/false setting of the model on screen.",
+             "input_schema": {"type": "object", "properties": {"name": name, "on": {"type": "boolean"}},
+                              "required": ["name", "on"]}},
+            {"name": "cad_undo", "description": "Undo the last edit to the model.",
+             "input_schema": {"type": "object", "properties": {}}},
+            {"name": "cad_reset", "description": "Discard all unsaved edits to the model.",
+             "input_schema": {"type": "object", "properties": {}}},
+            {"name": "cad_save", "description": "Write the edited dimensions into the model's file. Only when asked to save.",
+             "input_schema": {"type": "object", "properties": {}}},
+            smooth,
+        ]
+        rows = []
+        for p in s.params[:120]:
+            cur = s.current(p.name)
+            note = f"  ({p.comment})" if p.comment else ""
+            rows.append(f"- {p.name} [{p.readable}] = {self._say_value(p, cur)}{note}")
+        context = (
+            f"The user has the part '{s.path.stem}' ({s.path.name}) open in the model viewer and can "
+            "change it by voice. Its editable dimensions, in the file's units (usually mm):\n"
+            + "\n".join(rows) +
+            "\nRules for this part:\n"
+            "1. Only change it when the user asks for a change. A question (how, why, what, should, "
+            "could) gets a one-sentence answer that names the dimensions you would change and asks "
+            "whether to do it; call no tool.\n"
+            "2. Work out what the request means physically for this part and make every edit it "
+            "implies, using the exact names above. \"Wider lenses\" is lens width alone; \"bigger "
+            "lenses\" is width and height; fitting a wider face widens the spacing between the eyes "
+            "and the parts that follow it, not just one gap.\n"
+            "3. If you cannot tell which dimensions are meant, or how much, do not guess: ask one "
+            "short question naming the two or three likely dimensions.\n"
+            "4. After editing, say in one sentence what changed, with the new values. Do not ask "
+            "whether they want anything else.")
+        return specs, context
+
+    async def _cad_tool_run(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        mapping = {
+            "cad_set_dimension": ("__cad_set", {"param": args.get("name"), "value": args.get("value")}),
+            "cad_change_dimension": ("__cad_nudge", {"param": args.get("name"),
+                                                     "up": str(args.get("direction", "")).lower() in (
+                                                         "bigger", "increase", "up", "larger", "longer", "more",
+                                                         "raise", "wider", "thicker", "taller", "grow"),
+                                                     "amount": args.get("amount"),
+                                                     "percent": bool(args.get("percent"))}),
+            "cad_toggle": ("__cad_bool", {"param": args.get("name"), "on": bool(args.get("on"))}),
+            "cad_undo": ("__cad_undo", {}), "cad_reset": ("__cad_reset", {}), "cad_save": ("__cad_save", {}),
+        }
+        if name == "model_smooth":
+            return {"ok": True, "result": await self.smooth_model(speak=False)}
+        if name not in mapping:
+            return {"ok": False, "error": f"no such tool {name}"}
+        action, a = mapping[name]
+        if action in ("__cad_set", "__cad_nudge", "__cad_bool") and self.cad_edit and \
+                str(a.get("param")) not in self.cad_edit.by_name:
+            return {"ok": False, "error": f"no dimension named {a.get('param')}; use an exact name from the list"}
+        self._cad_msg = ""
+        await self.cad_action(action, a, "model", speak=False)
+        return {"ok": True, "result": self._cad_msg or "done"}
 
     async def open_source(self, query: str, app_hint: str = "",
                           source: str = "voice") -> bool:

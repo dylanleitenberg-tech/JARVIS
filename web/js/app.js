@@ -401,8 +401,10 @@
   });
   bus.on('model_update', async (e) => {
     if (!viewer.model) return;
-    await viewer.load(viewer.model, { url: e.url, keepView: true });
-    if (viewer.updateParams) viewer.updateParams(e.params, e.dirty);
+    const url = e.url || viewer.lastUrl ||
+      ('/api/model?path=' + encodeURIComponent(viewer.model.path));
+    await viewer.load(viewer.model, { url, keepView: true, smooth: !!e.smooth });
+    if (viewer.updateParams && e.params) viewer.updateParams(e.params, e.dirty);
     if (viewer.setBuilding) viewer.setBuilding(false);
   });
 

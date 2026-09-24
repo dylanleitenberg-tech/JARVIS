@@ -32,6 +32,10 @@ import sys
 from typing import Any, Dict, List, Optional
 
 TOOL_ROUNDS = 4  # how many times the model may call tools before we stop
+# What the Claude Code bridge says when it could not answer; the local model
+# takes over rather than JARVIS saying it aloud.
+_BRIDGE_FAILURES = {"My link to Claude Code failed.", "That took too long, Sir. I gave up on it.",
+                    "I could not read that request."}
 OLLAMA_URL = "http://localhost:11434/v1"
 # Small enough to answer a spoken question in about a second on Apple silicon,
 # and one of the few at that size that calls tools reliably.
@@ -61,6 +65,11 @@ class Brain:
         self.bus = bus
         self.dispatcher = dispatcher
         self.backend = self.cfg.get("backend", "anthropic")
+        # Tools that exist only in the moment, like the dimensions of the model
+        # on screen: a callable returning (tool specs, extra system text), and
+        # the coroutine that runs them. Set by the host.
+        self.extra_tools = None
+        self.extra_run = None
         self.history: List[Dict[str, Any]] = []
         self.client = None
         self.status = "offline"
@@ -68,6 +77,21 @@ class Brain:
         self._local = False          # an ollama model, holding RAM while loaded
         self._idle_task = None
         self._init_client()
+        # The understanding step: anything the fixed phrases miss goes to Claude
+        # through the Claude Code login when the CLI is here (4-12 s, and it
+        # turned "fit a wider face" into three right edits where the local
+        # model made one), with the configured backend as the fallback.
+        # ai.smart_backend: "claude-code" (default) or "off".
+        self._smart_cmd = None
+        self.cmd_history: List[Dict[str, str]] = []
+        if self.cfg.get("smart_backend", "claude-code") == "claude-code" and \
+                self.cfg.get("backend") not in ("offline", "command", "claude-code"):
+            bridge = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "claude_code.py"
+            if bridge.exists() and self._claude_binary(bridge):
+                self._smart_cmd = [sys.executable, str(bridge)]
+                self.detail = f"claude code, fallback {self.detail or self.backend}"
+                if self.status != "ready":
+                    self.status = "ready"
 
     # -------------------------------------------------------------- setup
 
@@ -196,6 +220,61 @@ class Brain:
             return f"ollama has no {want}; it has {', '.join(names[:4])}"
         return f"ollama {want or names[0]}"
 
+    async def ensure_local(self) -> bool:
+        """A local model whose server is not running is the most common reason
+        J.A.R.V.I.S. goes deaf to anything but fixed phrases. If ollama is
+        installed, start it rather than report it."""
+        if not self._local:
+            return self.status == "ready"
+        self.status = "ready"
+        self.detail = self._ollama_detail()
+        if self.status == "ready" or "not running" not in self.detail:
+            return self.status == "ready"
+        import shutil
+        exe = shutil.which("ollama") or next((p for p in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama")
+                                              if os.path.exists(p)), None)
+        if not exe:
+            return False
+        logdir = pathlib.Path(__file__).resolve().parents[2] / "logs"
+        logdir.mkdir(exist_ok=True)
+        with open(logdir / "ollama.log", "ab") as log:
+            subprocess.Popen([exe, "serve"], stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                             start_new_session=True)
+        await self.bus.publish("log", level="info", text="brain: started ollama serve")
+        for _ in range(40):
+            await asyncio.sleep(0.25)
+            self.status = "ready"
+            self.detail = await asyncio.to_thread(self._ollama_detail)
+            if self.status == "ready" or "not running" not in self.detail:
+                break
+        return self.status == "ready"
+
+    def _tools_and_system(self, kind: str):
+        """The registry's tools plus any live ones, and the system prompt with
+        their context appended."""
+        specs = list(self.dispatcher.tool_specs()) if self.cfg.get("allow_tools", True) else []
+        system = self.cfg["system"]
+        extra_names = set()
+        if self.extra_tools:
+            try:
+                more, context = self.extra_tools()
+            except Exception:
+                more, context = [], ""
+            specs += more
+            extra_names = {s["name"] for s in more}
+            if context:
+                system = system + "\n\n" + context
+        if kind == "openai":
+            specs = [{"type": "function",
+                      "function": {"name": s["name"], "description": s["description"],
+                                   "parameters": s["input_schema"]}} for s in specs]
+        return specs, system, extra_names
+
+    async def _run_tool(self, name: str, args: Dict[str, Any], extra_names) -> Dict[str, Any]:
+        if name in extra_names and self.extra_run:
+            return await self.extra_run(name, args)
+        return await self.dispatcher.run(name, args, source="model")
+
     def info(self) -> Dict[str, str]:
         return {"backend": self.backend, "status": self.status,
                 "detail": self.detail, "model": self.cfg.get("model", "")}
@@ -206,13 +285,29 @@ class Brain:
         """Answer an utterance, running tools as needed. Returns the spoken line."""
         await self.bus.publish("thinking", on=True)
         try:
-            if self.backend == "anthropic":
+            reply = None
+            if self._smart_cmd:
+                reply = await self._ask_command(text, argv=self._smart_cmd)
+                if reply in _BRIDGE_FAILURES:
+                    await self.bus.publish("log", level="warn",
+                                           text="brain: Claude Code did not answer; using the local model")
+                    reply = None
+            local_down = False
+            if reply is None and self._local:
+                local_down = not await self.ensure_local()
+                if self._smart_cmd:
+                    self.status = "ready"          # Claude Code is still the main path
+            if reply is not None:
+                pass
+            elif local_down:
+                reply = ("I did not follow that, Sir, and no model is answering. Try a direct command.")
+            elif self.backend == "anthropic":
                 reply = await self._ask_anthropic(text)
             elif self.backend == "openai":
                 reply = await self._ask_openai(text)
             elif self.backend == "command":
                 reply = await self._ask_command(text)
-            else:
+            elif self.backend != "anthropic":
                 reply = ("I did not follow that, Sir, and I have no model connected. "
                          "Try a direct command.")
         except Exception as exc:
@@ -285,14 +380,14 @@ class Brain:
     async def _ask_anthropic(self, text: str) -> str:
         self.history.append({"role": "user", "content": text})
         self._trim()
-        tools = self.dispatcher.tool_specs() if self.cfg.get("allow_tools", True) else []
+        tools, system, extra_names = self._tools_and_system("anthropic")
         spoken = ""
 
         for _round in range(TOOL_ROUNDS):
             kwargs: Dict[str, Any] = {
                 "model": self.cfg["model"],
                 "max_tokens": int(self.cfg["max_tokens"]),
-                "system": self.cfg["system"],
+                "system": system,
                 "messages": self.history,
             }
             if tools:
@@ -316,8 +411,7 @@ class Brain:
 
             results = []
             for call in calls:
-                outcome = await self.dispatcher.run(call.name, dict(call.input or {}),
-                                                    source="model")
+                outcome = await self._run_tool(call.name, dict(call.input or {}), extra_names)
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": call.id,
@@ -334,23 +428,26 @@ class Brain:
     async def _ask_openai(self, text: str) -> str:
         self.history.append({"role": "user", "content": text})
         self._trim()
-        tools = [{"type": "function",
-                  "function": {"name": spec["name"], "description": spec["description"],
-                               "parameters": spec["input_schema"]}}
-                 for spec in self.dispatcher.tool_specs()] \
-            if self.cfg.get("allow_tools", True) else []
+        tools, system, extra_names = self._tools_and_system("openai")
 
         spoken = ""
         for _round in range(TOOL_ROUNDS):
             body: Dict[str, Any] = {
                 "model": self.cfg["model"],
                 "max_tokens": int(self.cfg["max_tokens"]),
-                "messages": [{"role": "system", "content": self.cfg["system"]}] + self.history,
+                "messages": [{"role": "system", "content": system}] + self.history,
             }
             if tools:
                 body["tools"] = tools
-            if self.cfg.get("reasoning_effort"):
-                body["reasoning_effort"] = self.cfg["reasoning_effort"]
+            effort = self.cfg.get("reasoning_effort")
+            # Turning a request about a part into the right dimensions is where
+            # a small local model with thinking switched off guesses: "fit a
+            # wider face" became one 10% nudge. While a part is on screen it
+            # thinks briefly (ai.cad_reasoning_effort, default "low").
+            if extra_names and effort == "none":
+                effort = self.cfg.get("cad_reasoning_effort", "low")
+            if effort:
+                body["reasoning_effort"] = effort
             response = await self.client.post("/chat/completions", json=body)
             response.raise_for_status()
             message = response.json()["choices"][0]["message"]
@@ -370,7 +467,7 @@ class Brain:
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                outcome = await self.dispatcher.run(fn["name"], args, source="model")
+                outcome = await self._run_tool(fn["name"], args, extra_names)
                 self.history.append({
                     "role": "tool", "tool_call_id": call["id"],
                     "content": json.dumps(outcome.get("result") if outcome.get("ok")
@@ -380,18 +477,20 @@ class Brain:
 
     # ---------------------------------------------------------- command
 
-    async def _ask_command(self, text: str) -> str:
+    async def _ask_command(self, text: str, argv: Optional[List[str]] = None) -> str:
         """Pipe the utterance to a local program and speak whatever it prints.
 
         The program cannot make real tool calls, so it returns any actions it
         wants as data and J.A.R.V.I.S. runs them through the usual dispatcher —
         which means the confirmation gate still applies to whatever it asks for.
         """
-        argv = list(self.cfg["command"])
+        argv = list(argv or self.cfg["command"])
+        tools, system, extra_names = self._tools_and_system("anthropic")
         payload = json.dumps({
             "text": text,
-            "system": self.cfg["system"],
-            "tools": self.dispatcher.tool_specs() if self.cfg.get("allow_tools", True) else [],
+            "system": system,
+            "tools": tools,
+            "history": self.cmd_history[-6:],
         })
 
         def call() -> dict:
@@ -413,13 +512,17 @@ class Brain:
         if reply:
             await self.bus.publish("say_partial", text=reply)
 
-        for call_spec in (result.get("actions") or [])[:TOOL_ROUNDS]:
+        for call_spec in (result.get("actions") or [])[:8]:
             if not isinstance(call_spec, dict) or not call_spec.get("name"):
                 continue
-            await self.dispatcher.run(str(call_spec["name"]),
-                                      dict(call_spec.get("args") or {}), source="model")
+            await self._run_tool(str(call_spec["name"]), dict(call_spec.get("args") or {}), extra_names)
 
-        return reply or "Done."
+        reply = reply or "Done."
+        if reply not in _BRIDGE_FAILURES:
+            self.cmd_history.append({"user": text, "reply": reply})
+            self.cmd_history = self.cmd_history[-12:]
+        return reply
 
     def reset(self) -> None:
         self.history.clear()
+        self.cmd_history.clear()

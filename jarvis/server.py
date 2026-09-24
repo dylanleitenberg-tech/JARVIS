@@ -92,7 +92,8 @@ class Server:
         """Serve one model file, only from an allow-listed root."""
         if self.models is None:
             raise web.HTTPNotFound()
-        path = self.models.renderable(request.query.get("path", ""))
+        fine = request.query.get("detail") == "fine"
+        path = await asyncio.to_thread(self.models.renderable, request.query.get("path", ""), fine)
         if path is None:
             detail = getattr(self.models, "last_error", "")
             raise web.HTTPForbidden(

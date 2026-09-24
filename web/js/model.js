@@ -56,6 +56,45 @@
     return { positions: new Float32Array(verts), normals: null };
   }
 
+  /* Smooth shading. STL carries one normal per triangle, so a curved surface
+     tessellated coarsely (a STEP nozzle at 26 degrees a facet) reads as
+     flat strips. Each vertex here takes the mean normal of the triangles
+     that share its position, but only those within `angle` of its own face,
+     so a cylinder goes smooth while a flange edge stays sharp. */
+  function creasedNormals(pos, angle) {
+    const nTri = pos.length / 9, cosA = Math.cos(angle * Math.PI / 180);
+    const fn = new Float32Array(nTri * 3);
+    for (let t = 0; t < nTri; t++) {
+      const o = t * 9;
+      const ax = pos[o + 3] - pos[o], ay = pos[o + 4] - pos[o + 1], az = pos[o + 5] - pos[o + 2];
+      const bx = pos[o + 6] - pos[o], by = pos[o + 7] - pos[o + 1], bz = pos[o + 8] - pos[o + 2];
+      let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const l = Math.hypot(nx, ny, nz) || 1;
+      fn[t * 3] = nx / l; fn[t * 3 + 1] = ny / l; fn[t * 3 + 2] = nz / l;
+    }
+    const q = 1e4, buckets = new Map(), keys = new Array(nTri * 3);
+    for (let v = 0; v < nTri * 3; v++) {
+      const key = Math.round(pos[v * 3] * q) + ',' + Math.round(pos[v * 3 + 1] * q) + ',' + Math.round(pos[v * 3 + 2] * q);
+      keys[v] = key;
+      let list = buckets.get(key);
+      if (!list) { list = []; buckets.set(key, list); }
+      list.push((v / 3) | 0);
+    }
+    const out = new Float32Array(pos.length);
+    for (let v = 0; v < nTri * 3; v++) {
+      const t = (v / 3) | 0, tx = fn[t * 3], ty = fn[t * 3 + 1], tz = fn[t * 3 + 2];
+      let sx = 0, sy = 0, sz = 0;
+      for (const j of buckets.get(keys[v])) {
+        const jx = fn[j * 3], jy = fn[j * 3 + 1], jz = fn[j * 3 + 2];
+        if (tx * jx + ty * jy + tz * jz >= cosA) { sx += jx; sy += jy; sz += jz; }
+      }
+      const l = Math.hypot(sx, sy, sz);
+      if (l > 1e-9) { out[v * 3] = sx / l; out[v * 3 + 1] = sy / l; out[v * 3 + 2] = sz / l; }
+      else { out[v * 3] = tx; out[v * 3 + 1] = ty; out[v * 3 + 2] = tz; }
+    }
+    return out;
+  }
+
   // The model is scaled so its longest side spans 2 units. A long thin part
   // (the worm string) is only 0.13 thick, so the camera has to get well inside
   // the box before a segment fills the view: 0.2 allows that. 5.5 keeps the
@@ -148,7 +187,8 @@
       const rebuild = !!(opts.url && opts.keepView && this._norm && this.model === model);
       if (!rebuild) this.setStatus(`loading ${model.name}…`);
       try {
-        const res = await fetch(opts.url || ('/api/model?path=' + encodeURIComponent(model.path)));
+        const src = opts.url || ('/api/model?path=' + encodeURIComponent(model.path));
+        const res = await fetch(src);
         if (!res.ok) throw new Error(await res.text());
         const { positions, normals } = parseSTL(await res.arrayBuffer());
 
@@ -170,6 +210,13 @@
         else this._norm = { centre: centre.clone(), scale };
         geometry.translate(-centre.x, -centre.y, -centre.z);
         geometry.scale(scale, scale, scale);
+        // "Make it smooth" sticks for this model, through rebuilds; a new model starts faceted.
+        if (!rebuild && this.model !== model) this.smooth = false;
+        if (opts.smooth) this.smooth = true;
+        if (this.smooth) {
+          geometry.setAttribute('normal', new THREE.BufferAttribute(
+            creasedNormals(geometry.attributes.position.array, 38), 3));
+        }
 
         if (this.mesh) {
           this.group.remove(this.mesh);
@@ -177,7 +224,7 @@
         }
         const material = new THREE.MeshPhongMaterial({
           color: 0x7fd4ef, specular: 0xbfefff, shininess: 28,
-          flatShading: !normals,
+          flatShading: !normals && !this.smooth,
         });
         this.mesh = new THREE.Mesh(geometry, material);
         this.group.add(this.mesh);
@@ -187,6 +234,7 @@
           new THREE.LineBasicMaterial({ color: 0xb6f2ff, transparent: true, opacity: 0.28 }));
         this.mesh.add(edges);
 
+        this.lastUrl = src;
         const fresh = this.model !== model || !rebuild;
         this.model = model;
         const tris = positions.length / 9;

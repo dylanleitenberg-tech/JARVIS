@@ -111,8 +111,9 @@ class ModelIndex:
 
     # ------------------------------------------------------------ lookup
 
-    def renderable(self, raw: str) -> Optional[pathlib.Path]:
-        """A path the viewer can load: STL as-is, .scad compiled and cached."""
+    def renderable(self, raw: str, fine: bool = False) -> Optional[pathlib.Path]:
+        """A path the viewer can load: STL as-is, .scad compiled and cached.
+        fine=True converts a STEP at finer detail (for "make it smooth")."""
         path = self.resolve(raw)
         if path is None:
             return None
@@ -120,7 +121,7 @@ class ModelIndex:
         if suffix == ".scad":
             return self.compile_scad(path)
         if suffix in (".step", ".stp"):
-            return self.compile_step(path)
+            return self.compile_step(path, fine=fine)
         return path
 
     def compile_scad(self, path: pathlib.Path) -> Optional[pathlib.Path]:
@@ -181,7 +182,14 @@ class ModelIndex:
                 return exe
         return None
 
-    def compile_step(self, path: pathlib.Path) -> Optional[pathlib.Path]:
+    # Facet angle is what makes a converted nozzle look like strips: 0.45 rad
+    # (26 degrees) is quick, 0.25 rad (14 degrees) is 2.5 times the triangles
+    # (the aft engine: 337k -> 828k, 4.7 s -> 5.9 s). 0.15 rad was 3.3 M and
+    # 166 MB, too heavy to turn by hand.
+    STEP_COARSE = ("0.8", "0.45")
+    STEP_FINE = ("0.8", "0.25")
+
+    def compile_step(self, path: pathlib.Path, fine: bool = False) -> Optional[pathlib.Path]:
         """Convert a STEP file to binary STL, cached on its modification time."""
         import hashlib
         import subprocess
@@ -197,12 +205,13 @@ class ModelIndex:
         key = hashlib.sha1(f"{path}:{stamp}".encode()).hexdigest()[:16]
         cache = pathlib.Path(__file__).resolve().parent.parent / "build" / "step"
         cache.mkdir(parents=True, exist_ok=True)
-        out = cache / f"{path.stem}-{key}.stl"
+        out = cache / f"{path.stem}-{key}{'-fine' if fine else ''}.stl"
         if out.exists() and out.stat().st_size > 0:
             return out
         script = pathlib.Path(__file__).resolve().parent / "step2stl.py"
+        tol, ang = self.STEP_FINE if fine else self.STEP_COARSE
         try:
-            proc = subprocess.run([exe, str(script), str(path), str(out)],
+            proc = subprocess.run([exe, str(script), str(path), str(out), tol, ang],
                                   capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
             self.last_error = "STEP conversion timed out"
