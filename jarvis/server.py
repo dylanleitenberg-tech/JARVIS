@@ -58,6 +58,7 @@ class Server:
         self.app = web.Application(client_max_size=4 * 1024 * 1024,
                                    middlewares=[no_store])
         self._runner: Optional[web.AppRunner] = None
+        self._stopping = False
         self._routes()
         bus.on("*", self._mirror)
 
@@ -198,7 +199,12 @@ class Server:
         interval = 1.0 / max(1, int(self.config["vision"].get("fps", 30)))
         last = None
         try:
-            while True:
+            # Ends on its own when the server stops or the viewer goes. Once
+            # the camera is released no new frame comes, nothing is written,
+            # and a closed connection is only noticed on a write: this loop
+            # used to run on alone and hold every shutdown for a minute.
+            while not self._stopping and not (request.transport is None
+                                              or request.transport.is_closing()):
                 jpeg = self.get_jpeg()
                 if jpeg is not None and jpeg is not last:
                     last = jpeg
@@ -236,13 +242,15 @@ class Server:
     # ---------------------------------------------------------- lifecycle
 
     async def start(self) -> str:
-        self._runner = web.AppRunner(self.app, access_log=None)
+        # A request still running at shutdown gets 5 s, not aiohttp's 60.
+        self._runner = web.AppRunner(self.app, access_log=None, shutdown_timeout=5.0)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.cfg["host"], int(self.cfg["port"]))
         await site.start()
         return f"http://{self.cfg['host']}:{self.cfg['port']}/"
 
     async def stop(self) -> None:
+        self._stopping = True
         for ws in list(self.clients):
             await ws.close()
         if self._runner is not None:

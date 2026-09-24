@@ -26,6 +26,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
+from . import children
 from . import config as config_module
 from . import platforms
 from .control import PLATFORM, desktop
@@ -270,8 +271,9 @@ class Permissions:
         exe = platforms.ollama()
         model = self.host.cfg["ai"].get("local_model") or "qwen3:8b"
         log = open(config_module.ROOT / "logs" / "ollama-pull.log", "ab")
-        self._pulling = subprocess.Popen([exe, "pull", model], stdout=log, stderr=log,
-                                         stdin=subprocess.DEVNULL)
+        # Owned, so closing J.A.R.V.I.S. stops the download; ollama resumes it.
+        self._pulling = children.popen([exe, "pull", model], stdout=log, stderr=log,
+                                       stdin=subprocess.DEVNULL)
         return f"downloading {model} — this takes a while; JARVIS switches to it when done"
 
     def _add_folder(self, raw: str) -> str:

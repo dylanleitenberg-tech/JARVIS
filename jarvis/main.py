@@ -28,6 +28,7 @@ import time
 import webbrowser
 from typing import Any, Dict, Optional
 
+from . import children
 from . import config as config_module
 from .ai.brain import Brain
 from .ai import intents
@@ -248,6 +249,7 @@ class Jarvis:
         self.close_hud()                     # Chrome owns the microphone
         if self.vision:
             self.vision.stop(join=True)      # the worker owns the camera
+        children.stop_all()                  # ollama, OpenSCAD, Claude Code, ...
         self._stop_bundle_parent()           # and the app bundle above us
 
     def _stop_bundle_parent(self) -> None:
@@ -1400,9 +1402,9 @@ class Jarvis:
         env["JARVIS_CLAUDE_EDIT_TIMEOUT"] = str(timeout)
 
         def call() -> Dict[str, Any]:
-            proc = subprocess.run([_sys.executable, str(bridge)], input=json.dumps(payload),
-                                  capture_output=True, text=True,
-                                  timeout=timeout + 60, env=env)
+            proc = children.run([_sys.executable, str(bridge)], input=json.dumps(payload),
+                                capture_output=True, text=True,
+                                timeout=timeout + 60, env=env)
             lines = [l for l in proc.stdout.splitlines() if l.strip().startswith("{")]
             return json.loads(lines[-1]) if lines else {"say": "The edit came back empty.", "failed": True}
         return await asyncio.to_thread(call)

@@ -14,10 +14,11 @@ import hashlib
 import json
 import pathlib
 import re
-import subprocess
 import time
 from collections import OrderedDict
 from typing import Dict, List, Optional
+
+from . import children
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CACHE = ROOT / "build" / "step_edit"
@@ -25,8 +26,8 @@ TOOL = pathlib.Path(__file__).resolve().parent / "step_tool.py"
 
 
 def _run(python: str, request: dict, timeout: float = 600) -> dict:
-    proc = subprocess.run([python, str(TOOL)], input=json.dumps(request), capture_output=True,
-                          text=True, timeout=timeout)
+    proc = children.run([python, str(TOOL)], input=json.dumps(request), capture_output=True,
+                        text=True, timeout=timeout)
     lines = [l for l in proc.stdout.splitlines() if l.strip().startswith("{")]
     if not lines:
         return {"ok": False, "error": (proc.stderr or "no output").strip()[-600:]}

@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from . import children
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CACHE = ROOT / "build" / "scad_edit"
 BACKUPS = ROOT / "build" / "scad_backups"
@@ -401,8 +403,8 @@ class EditSession:
             gen = self._generation
             if self._proc and self._proc.poll() is None:
                 self._proc.kill()
-            proc = subprocess.Popen(args, cwd=str(self.path.parent),
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = children.popen(args, cwd=str(self.path.parent),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self._proc = proc
         try:
             _, err = proc.communicate(timeout=240)
@@ -411,6 +413,8 @@ class EditSession:
             self.last_error = "compile timed out"
             out.unlink(missing_ok=True)
             return None
+        finally:
+            children.release(proc)
         if gen != self._generation:          # superseded while running
             out.unlink(missing_ok=True)
             return None

@@ -15,7 +15,7 @@ import re
 import time
 from typing import Dict, List, Optional
 
-from . import platforms
+from . import children, platforms
 
 # Only what the HUD viewer can actually parse. Listing .3mf and .obj here
 # indexed files the viewer then failed to open — an index that offers a model
@@ -207,7 +207,7 @@ class ModelIndex:
         if out.exists() and out.stat().st_size > 0:
             return out
         try:
-            proc = subprocess.run(
+            proc = children.run(
                 # binstl, not the default ASCII: 439 KB instead of 2.6 MB for
                 # the same 8,780 triangles, and it parses without a text pass.
                 # Manifold: 0.16 s against 5.9 s on CGAL for the glasses frame;
@@ -270,8 +270,8 @@ class ModelIndex:
         script = pathlib.Path(__file__).resolve().parent / "step2stl.py"
         tol, ang = self.STEP_FINE if fine else self.STEP_COARSE
         try:
-            proc = subprocess.run([exe, str(script), str(path), str(out), tol, ang],
-                                  capture_output=True, text=True, timeout=300)
+            proc = children.run([exe, str(script), str(path), str(out), tol, ang],
+                                capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:
             self.last_error = "STEP conversion timed out"
             return None

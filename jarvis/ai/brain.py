@@ -31,7 +31,7 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional
 
-from .. import platforms
+from .. import children, platforms
 
 TOOL_ROUNDS = 4  # how many times the model may call tools before we stop
 # What the Claude Code bridge says when it could not answer; the local model
@@ -252,11 +252,13 @@ class Brain:
             return False
         logdir = pathlib.Path(__file__).resolve().parents[2] / "logs"
         logdir.mkdir(exist_ok=True)
+        # Owned: the server he started ends when he does. One that was already
+        # running before him is someone else's and is never touched.
         with open(logdir / "ollama.log", "ab") as log:
             detach = ({"creationflags": 0x00000008 | 0x08000000} if sys.platform == "win32"
-                      else {"start_new_session": True})
-            subprocess.Popen([exe, "serve"], stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-                             **detach)
+                      else {})
+            children.popen([exe, "serve"], stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+                           **detach)
         await self.bus.publish("log", level="info", text="brain: started ollama serve")
         for _ in range(40):
             await asyncio.sleep(0.25)
@@ -529,8 +531,8 @@ class Brain:
             env["JARVIS_CLAUDE_MODEL"] = smart
 
         def call() -> dict:
-            proc = subprocess.run(argv, input=payload, capture_output=True,
-                                  text=True, timeout=90, env=env)
+            proc = children.run(argv, input=payload, capture_output=True,
+                                text=True, timeout=90, env=env)
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr.strip()[:300] or "command failed")
             out = proc.stdout.strip()

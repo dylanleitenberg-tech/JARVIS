@@ -565,3 +565,8 @@ The switch shows three states:
 
 Switching it on deliberately keeps it on. Only a palm-hold arm times out, and
 only after `gestures.disarm_after_idle` with no hand seen at all.
+
+## License
+
+MIT: see `LICENSE`. Bundled fonts and three.js keep their own licenses: see
+`THIRD_PARTY_NOTICES.md`.

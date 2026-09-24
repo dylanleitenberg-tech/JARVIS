@@ -14,6 +14,18 @@
 
   const SR = global.SpeechRecognition || global.webkitSpeechRecognition;
 
+  // A headless or automation-driven browser is a test or a screenshot, never
+  // someone at the desk, so it gets neither the speakers nor the microphone:
+  // a headless screenshot of the HUD once greeted the room out loud while
+  // J.A.R.V.I.S. itself was shut down. Headless Chrome says so in its user
+  // agent even when navigator.webdriver is false. Stand-ins a test installs
+  // in place of the speech objects are not devices, and still run.
+  const nav = global.navigator || {};
+  const AUTOMATED = !!(nav.webdriver || /HeadlessChrome/.test(nav.userAgent || ''));
+  const native = (fn) => typeof fn === 'function'
+    && /\[native code\]/.test(Function.prototype.toString.call(fn));
+  const offLimits = (fn) => AUTOMATED && native(fn);
+
   class Speech {
     constructor(opts) {
       this.cfg = Object.assign({
@@ -188,6 +200,7 @@
 
     _arm() {
       if (!this.supported || !this.wantListening || this.speaking) return;
+      if (offLimits(SR)) return;
       const now = Date.now();
       if (now - this.lastStart < 320) {          // never hot-loop on an error
         setTimeout(() => this._arm(), 400);
@@ -311,6 +324,7 @@
 
     say(text) {
       if (!text || !global.speechSynthesis) return Promise.resolve();
+      if (offLimits(global.speechSynthesis.speak)) return Promise.resolve();
       return new Promise((resolve) => {
         // Hold recognition down for the whole utterance, or he answers himself.
         const wasListening = this.wantListening;
@@ -396,6 +410,7 @@
 
     async _startMeter() {
       if (this.analyser) return;
+      if (navigator.mediaDevices && offLimits(navigator.mediaDevices.getUserMedia)) return;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
