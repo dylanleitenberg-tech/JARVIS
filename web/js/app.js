@@ -390,6 +390,22 @@
     if (e.model) await viewer.load(e.model);
   });
 
+  // Live CAD edits: the assistant owns the numbers and the builds; the viewer
+  // shows the dimensions, sends slider and hand changes, and swaps the mesh.
+  bus.on('cad_params', (e) => { if (viewer.setParams) viewer.setParams(e.params, e.name, e.dirty); });
+  bus.on('cad_panel', () => { const el = document.getElementById('model-params'); if (el && viewer.params && viewer.params.length) el.hidden = false; });
+  bus.on('cad_select', (e) => { if (viewer.selectParam) viewer.selectParam(e.name); });
+  bus.on('cad_building', () => { if (viewer.setBuilding) viewer.setBuilding(true); });
+  bus.on('cad_failed', (e) => {
+    if (viewer.setBuilding) viewer.setBuilding(false);   // the reason arrives as a log line
+  });
+  bus.on('model_update', async (e) => {
+    if (!viewer.model) return;
+    await viewer.load(viewer.model, { url: e.url, keepView: true });
+    if (viewer.updateParams) viewer.updateParams(e.params, e.dirty);
+    if (viewer.setBuilding) viewer.setBuilding(false);
+  });
+
   /* ------------------------------------------------------- staying open */
 
   // The HUD is meant to stay up, so closing it asks first. `quitting` is set

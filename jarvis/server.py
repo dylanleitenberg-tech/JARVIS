@@ -41,7 +41,8 @@ class Server:
                  get_jpeg: Optional[Callable[[], Optional[bytes]]] = None,
                  hello: Optional[Callable[[], dict]] = None,
                  health: Optional[Callable[[], dict]] = None,
-                 models=None):
+                 models=None,
+                 edit_output: Optional[Callable[[str], Optional[object]]] = None):
         self.cfg = config["server"]
         self.config = config
         self.bus = bus
@@ -50,6 +51,7 @@ class Server:
         self.hello = hello
         self.health = health
         self.models = models
+        self.edit_output = edit_output
         self.clients: Set[web.WebSocketResponse] = set()
         self.app = web.Application(client_max_size=4 * 1024 * 1024,
                                    middlewares=[no_store])
@@ -65,6 +67,7 @@ class Server:
         self.app.router.add_get("/api/health", self.api_health)
         self.app.router.add_get("/api/models", self.api_models)
         self.app.router.add_get("/api/model", self.api_model)
+        self.app.router.add_get("/api/model_edit", self.api_model_edit)
         self.app.router.add_static("/", WEB_ROOT, show_index=False, follow_symlinks=False)
 
     # ------------------------------------------------------------ handlers
@@ -94,6 +97,18 @@ class Server:
             detail = getattr(self.models, "last_error", "")
             raise web.HTTPForbidden(
                 text=f"could not render that model. {detail}"[:500])
+        return web.FileResponse(path, headers={
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "no-store",
+        })
+
+    async def api_model_edit(self, request: web.Request) -> web.StreamResponse:
+        """The live-edited build of the model on screen, by its build key."""
+        if self.edit_output is None:
+            raise web.HTTPNotFound()
+        path = self.edit_output(request.query.get("key", ""))
+        if path is None:
+            raise web.HTTPNotFound(text="no such build")
         return web.FileResponse(path, headers={
             "Content-Type": "application/octet-stream",
             "Cache-Control": "no-store",

@@ -844,3 +844,29 @@ button.ghost.power:hover {
 .switch.inert .switch-state { color: var(--amber); }
 .switch.inert .switch-track { border-color: var(--amber); }
 .switch.inert .switch-track i { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+
+/* Live edit panel: the .scad's own dimensions, dragged by slider, hand or voice. */
+.model-params {
+  position: absolute; left: 16px; top: 14px; bottom: 44px; width: 270px; z-index: 5;
+  display: flex; flex-direction: column;
+  background: rgba(2, 14, 22, .82); border: 1px solid var(--hud-faint);
+  font-family: var(--font-mono); font-size: 11px; color: var(--hud-mid);
+}
+.model-params[hidden] { display: none; }
+.model-params header {
+  display: flex; justify-content: space-between; padding: 8px 12px;
+  border-bottom: 1px solid var(--hud-faint);
+  font-family: var(--font-head); font-size: 10px; letter-spacing: .25em; color: var(--hud-bright);
+}
+.model-params header i { font-style: normal; font-family: var(--font-mono); letter-spacing: .1em; color: var(--hud-dim); }
+.model-params.building header i::after { content: ' · building'; color: var(--hud); }
+.model-params .params { overflow-y: auto; padding: 4px 0; scrollbar-width: thin; }
+.model-params .param { padding: 5px 12px; border-left: 2px solid transparent; }
+.model-params .param label { display: flex; justify-content: space-between; gap: 8px; }
+.model-params .param label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-params .param b { font-weight: 400; color: var(--hud-bright); }
+.model-params .param.changed b { color: #ffcf6e; }
+.model-params .param.picked { border-left-color: var(--hud); background: rgba(100,227,255,.08); }
+.model-params .param input[type=range] { width: 100%; accent-color: #64e3ff; height: 14px; margin: 2px 0 0; }
+.model-params .param input[type=checkbox] { accent-color: #64e3ff; }
+.model-params footer { margin-top: auto; padding: 7px 12px; border-top: 1px solid var(--hud-faint); font-size: 9px; color: var(--hud-dim); letter-spacing: .06em; }

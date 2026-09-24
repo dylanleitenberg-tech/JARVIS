@@ -347,6 +347,36 @@ other people talking: "show the worm, ok so anyway" still shows the worm.
 Zoom holds where it is the moment your hand touches the edge of the frame
 instead of springing back, and goes in until the camera is at the surface.
 
+## Editing the model live
+
+An OpenSCAD part is a program whose top-level numbers are its dimensions
+(`rim_t = 3.5;`), so JARVIS can change them without a CAD application. When a
+`.scad` model is on screen a panel lists those numbers with sliders, and the
+part is rebuilt with `openscad -D name=value` on OpenSCAD's Manifold engine and
+swapped in place, same camera, same scale, so a longer part looks longer.
+The glasses frame rebuilds in about 0.1 s, most parts in about a second, the
+whole MITE in 8 s. While a slider or a hand is moving only the latest value is
+built; a new build stops the one in flight.
+
+| say | does |
+|---|---|
+| "set rim thickness to 3" | sets a dimension (the spoken name only has to be close) |
+| "make the wall thicker", "make it a bit shorter" | 10% either way (a count: one) |
+| "increase lens width by 2 mm", "reduce the gap by 20 percent" | by an amount |
+| "turn on explode" | switches a true/false setting |
+| "adjust the bridge gap" | picks it for the hand: pinch and move up or down |
+| "done" | lets go of it |
+| "what can I change" | reads out the dimensions |
+| "undo" | takes back the last edit (a whole drag is one edit) |
+| "reset changes" | back to the file as saved |
+| "save" | writes the numbers into the `.scad` |
+
+The file on disk is untouched until "save", which rewrites only the number on
+each changed line, keeps the comments, and first copies the original to
+`build/scad_backups/`. With no editable model open, "undo" and "save" are
+Cmd-Z and Cmd-S for the front app. STEP and STL are finished geometry with no
+dimensions in them, so they can be turned and zoomed but not edited.
+
 ## CAD mode
 
 Orbit, pan and zoom are what a 3D viewport needs constantly, and they are what

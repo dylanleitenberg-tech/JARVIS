@@ -144,7 +144,10 @@ class ModelIndex:
             proc = subprocess.run(
                 # binstl, not the default ASCII: 439 KB instead of 2.6 MB for
                 # the same 8,780 triangles, and it parses without a text pass.
-                [OPENSCAD, "--export-format", "binstl", "-o", str(out), str(path)],
+                # Manifold: 0.16 s against 5.9 s on CGAL for the glasses frame;
+                # the MITE never finished on CGAL in ten minutes, 8 s here.
+                [OPENSCAD, "--backend", "Manifold", "--export-format", "binstl",
+                 "-o", str(out), str(path)],
                 capture_output=True, text=True, timeout=180,
                 cwd=str(path.parent),          # so its include<> paths resolve
             )

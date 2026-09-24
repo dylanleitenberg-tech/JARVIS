@@ -73,6 +73,9 @@ class Jarvis:
         self.models = ModelIndex(cfg.get("models", {}).get("roots", []),
                                  int(cfg.get("models", {}).get("max_files", 4000)))
         intents.model_lookup = self.models.best
+        # Live parameter editing of the .scad model on screen (cadedit.py).
+        self.cad_edit = None
+        intents.param_lookup = lambda name: self.cad_edit.find(name) if self.cad_edit else None
 
     # --------------------------------------------------------------- setup
 
@@ -109,7 +112,7 @@ class Jarvis:
         self.server = Server(self.cfg, self.bus, self.on_hud_message,
                              get_jpeg=lambda: self.vision.latest_jpeg() if self.vision else None,
                              hello=self.hello, health=self.health,
-                             models=self.models)
+                             models=self.models, edit_output=self._edit_output)
         try:
             url = await self.server.start()
         except OSError as exc:
@@ -588,6 +591,17 @@ class Jarvis:
         elif kind == "model_view":
             if self.gestures:
                 self.gestures.viewer_open = bool(msg.get("open"))
+        elif kind == "model_loaded":
+            await self.start_edit(str(msg.get("path", "")))
+        elif kind == "cad_param":
+            s = self.cad_edit
+            name = str(msg.get("name", ""))
+            if s and name in s.by_name:
+                try:
+                    s.set(name, msg.get("value"))
+                except (TypeError, ValueError):
+                    return
+                self._schedule_rebuild(name)
         elif kind == "ready":
             await self.greet()
         elif kind == "ping":
@@ -744,6 +758,10 @@ class Jarvis:
                     await self.say("Nothing was waiting on you, Sir.")
                 return
 
+            if action.startswith("__cad_") and action not in ("__cad_fit",):
+                if await self.cad_action(action, args, source):
+                    return
+
             if action.startswith("__"):
                 # An unresolved internal intent: hand it to the model instead
                 # of trying to run it as an action.
@@ -770,6 +788,143 @@ class Jarvis:
         # Nothing matched locally — hand it to the model.
         reply = await self.brain.ask(text)
         await self.say(reply)
+
+    # ------------------------------------------------------- live CAD edits
+
+    def _edit_output(self, key: str):
+        s = self.cad_edit
+        if s is None or not (len(key) == 16 and all(c in "0123456789abcdef" for c in key)):
+            return None
+        path = s.output(key)
+        return path if path.exists() else None
+
+    async def start_edit(self, raw_path: str) -> None:
+        """The viewer loaded a model. A .scad one becomes editable."""
+        import pathlib
+        from .cadedit import EditSession
+        from .models import OPENSCAD
+        path = self.models.resolve(raw_path) if raw_path else None
+        if path is None or path.suffix.lower() != ".scad" or not pathlib.Path(OPENSCAD).exists():
+            self.cad_edit = None
+            await self.bus.publish("cad_params", path=None, params=[], dirty=False)
+            return
+        if self.cad_edit is None or self.cad_edit.path != path:
+            try:
+                self.cad_edit = await asyncio.to_thread(EditSession, path, OPENSCAD)
+            except OSError as exc:
+                self.cad_edit = None
+                await self.bus.publish("log", level="warn", text=f"cannot edit {path.name}: {exc}")
+                return
+        s = self.cad_edit
+        await self.bus.publish("cad_params", path=str(path), name=path.stem,
+                               params=s.state(), dirty=bool(s.overrides))
+
+    def _schedule_rebuild(self, changed: Optional[str] = None) -> None:
+        asyncio.create_task(self._rebuild(changed))
+
+    async def _rebuild(self, changed: Optional[str] = None) -> None:
+        s = self.cad_edit
+        if s is None:
+            return
+        await self.bus.publish("cad_building", name=changed)
+        started = time.time()
+        out = await asyncio.to_thread(s.compile)
+        if s is not self.cad_edit:
+            return
+        if out is None:
+            if s.last_error:                  # superseded builds say nothing
+                await self.bus.publish("cad_failed", name=changed, error=s.last_error[-300:])
+                await self.bus.publish("log", level="warn",
+                                       text=f"{s.path.name}: {s.last_error[-200:]}")
+            return
+        key = out.stem.rsplit("-", 1)[1]
+        await self.bus.publish("model_update", url=f"/api/model_edit?key={key}",
+                               params=s.state(), changed=changed, dirty=bool(s.overrides),
+                               seconds=round(time.time() - started, 2))
+
+    @staticmethod
+    def _say_value(p, value) -> str:
+        if p.kind == "bool":
+            return "on" if value else "off"
+        if p.kind == "int":
+            return str(int(value))
+        return f"{float(value):.4g}"
+
+    async def cad_action(self, action: str, args: Dict[str, Any], source: str) -> bool:
+        """Voice edits to the model on screen. Returns False to let the
+        utterance fall through when there is nothing to edit."""
+        s = self.cad_edit
+        if action == "__cad_undo":
+            if s and s.undo():
+                self._schedule_rebuild()
+                await self.say("Undone.")
+            elif s:
+                await self.say("Nothing to undo.")
+            else:
+                await self.dispatcher.run("press_key", {"combo": "cmd+z"}, source=source)
+            return True
+        if action == "__cad_save":
+            if s is None:
+                await self.dispatcher.run("press_key", {"combo": "cmd+s"}, source=source)
+                return True
+            if not s.overrides:
+                await self.say("Nothing has changed.")
+                return True
+            try:
+                backup = await asyncio.to_thread(s.save)
+            except (OSError, RuntimeError) as exc:
+                await self.say(f"Not saved. {exc}"[:160])
+                return True
+            await self.bus.publish("cad_params", path=str(s.path), name=s.path.stem,
+                                   params=s.state(), dirty=False)
+            await self.bus.publish("log", level="info",
+                                   text=f"saved {s.path.name}; original kept at {backup}")
+            await self.say(f"Saved to {s.path.name}. The original is backed up.")
+            return True
+        if s is None:
+            await self.say("Open an OpenSCAD model first. Its dimensions are what I can change.")
+            return True
+        if action == "__cad_reset":
+            s.reset()
+            self._schedule_rebuild()
+            await self.say("Back to the file as saved.")
+            return True
+        if action == "__cad_params":
+            await self.bus.publish("cad_panel", open=True)
+            names = [p.spoken for p in s.params[:5]]
+            more = f", and {len(s.params) - 5} more" if len(s.params) > 5 else ""
+            await self.say(f"{len(s.params)} dimensions. {', '.join(names)}{more}." if s.params
+                           else "This file has no plain numbers to change.")
+            return True
+        if action == "__cad_done":
+            await self.bus.publish("cad_select", name=None)
+            await self.say("Done.")
+            return True
+
+        p = s.find(str(args.get("param", "")))
+        if p is None:
+            await self.say(f"There is no {args.get('param', 'such')} in this part.")
+            return True
+        if action == "__cad_adjust":
+            await self.bus.publish("cad_select", name=p.name)
+            await self.say(f"{p.spoken}. Pinch and move your hand up or down.")
+            return True
+        try:
+            if action == "__cad_set":
+                value = s.set(p.name, args["value"])
+            elif action == "__cad_bool":
+                value = s.set(p.name, bool(args["on"]))
+            elif action == "__cad_nudge":
+                value = s.nudge(p.name, bool(args["up"]), args.get("amount"),
+                                bool(args.get("percent")))
+            else:
+                return False
+        except (TypeError, ValueError):
+            await self.say("I could not read that number.")
+            return True
+        self._schedule_rebuild(p.name)
+        await self.say(f"{p.spoken}, {self._say_value(p, value)}.")
+        return True
 
     async def open_source(self, query: str, app_hint: str = "",
                           source: str = "voice") -> bool:

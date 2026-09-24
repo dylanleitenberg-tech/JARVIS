@@ -31,7 +31,7 @@ def _num(text: str, default: int = 50) -> int:
 
 # A wake word at the front, with whatever punctuation follows it. Matches the
 # mishearings the config lists too, since those are what actually arrive.
-_ADDRESSED = re.compile(r"^(?:hey\s+|ok\s+)?(?:jarvis|javis|jervis|jarvus)\b[\s,.:;!?-]*",
+_ADDRESSED = re.compile(r"^(?:hey\s+|ok\s+|okay\s+|a\s+)?(?:jarvis|javis|jervis|jarvus)\b[\s,.:;!?-]*",
                         re.I)
 
 # (regex, builder) — the builder returns (action, args, acknowledgement).
@@ -46,6 +46,17 @@ def _is_model(name: str) -> bool:
     return bool(model_lookup and name and model_lookup(name))
 
 
+# Installed by the host: spoken name -> parameter of the .scad model on screen,
+# or None. The edit rules only claim an utterance when this finds something,
+# so "lower the volume" still reaches the volume rule.
+param_lookup: Optional[Any] = None
+
+
+def _param(name: str) -> Optional[Any]:
+    name = re.sub(r"^(?:the|its|that)\s+", "", name.strip(), flags=re.I)
+    return param_lookup(name) if (param_lookup and name) else None
+
+
 def rule(pattern: str):
     compiled = re.compile(pattern, re.I)
 
@@ -53,6 +64,93 @@ def rule(pattern: str):
         RULES.append((compiled, fn))
         return fn
     return wrap
+
+
+# -------------------------------------------------------- live CAD edits
+# "Set rim t to 3", "make the wall thicker by 20 percent", "turn off explode",
+# "adjust the bore" (then the hand drags it), "undo", "save changes".
+
+_UNIT = r"(?:\s*(%|percent|mm|millimet(?:er|re)s?|degrees?|units?))?"
+_UP = r"bigger|larger|longer|thicker|wider|taller|deeper|higher|more|up"
+_DOWN = r"smaller|shorter|thinner|narrower|lower|shallower|less|down"
+
+
+def _amount(num: Optional[str], unit: Optional[str]) -> Dict[str, Any]:
+    if num is None:
+        return {"amount": None, "percent": False}
+    return {"amount": float(num), "percent": bool(unit and unit.lower() in ("%", "percent"))}
+
+
+@rule(r"^(?:set|make|change|put)\s+(.+?)\s+(?:to|at|equal to|equals|=)\s+(-?\d+(?:\.\d+)?)" + _UNIT + r"[.!]?$")
+def _cad_set(m) -> Optional[Intent]:
+    p = _param(m.group(1))
+    return ("__cad_set", {"param": p.name, "value": float(m.group(2))}, "") if p else None
+
+
+@rule(r"^(?:turn|switch)\s+(on|off)\s+(.+?)[.!]?$")
+def _cad_bool_a(m) -> Optional[Intent]:
+    p = _param(m.group(2))
+    return ("__cad_bool", {"param": p.name, "on": m.group(1).lower() == "on"}, "") \
+        if p is not None and p.kind == "bool" else None
+
+
+@rule(r"^(?:turn|switch)\s+(.+?)\s+(on|off)[.!]?$")
+def _cad_bool_b(m) -> Optional[Intent]:
+    p = _param(m.group(1))
+    return ("__cad_bool", {"param": p.name, "on": m.group(2).lower() == "on"}, "") \
+        if p is not None and p.kind == "bool" else None
+
+
+@rule(r"^(?:make|set|get)\s+(.+?)\s+(?:a\s+(?:bit|little)\s+)?(" + _UP + "|" + _DOWN + r")"
+      r"(?:\s+by\s+(\d+(?:\.\d+)?)" + _UNIT + r")?[.!]?$")
+def _cad_make(m) -> Optional[Intent]:
+    p = _param(m.group(1))
+    if p is None:
+        return None
+    up = re.fullmatch(_UP, m.group(2).lower()) is not None
+    return ("__cad_nudge", dict({"param": p.name, "up": up}, **_amount(m.group(3), m.group(4))), "")
+
+
+@rule(r"^(increase|raise|grow|bump up|bump|extend|decrease|reduce|lower|shrink|cut|trim)\s+(.+?)"
+      r"(?:\s+by\s+(\d+(?:\.\d+)?)" + _UNIT + r")?[.!]?$")
+def _cad_verb(m) -> Optional[Intent]:
+    p = _param(m.group(2))
+    if p is None:
+        return None
+    up = m.group(1).lower() in ("increase", "raise", "grow", "bump up", "bump", "extend")
+    return ("__cad_nudge", dict({"param": p.name, "up": up}, **_amount(m.group(3), m.group(4))), "")
+
+
+@rule(r"^(?:adjust|tweak|grab|drag)\s+(.+?)[.!]?$")
+def _cad_adjust(m) -> Optional[Intent]:
+    p = _param(m.group(1))
+    return ("__cad_adjust", {"param": p.name}, "") if p else None
+
+
+@rule(r"^(?:undo|undo that|take that back)[.!]?$")
+def _cad_undo(m) -> Optional[Intent]:
+    return ("__cad_undo", {}, "")
+
+
+@rule(r"^(?:save|save (?:it|that|this|the (?:changes|edits|model|design|part)|changes|my changes))[.!]?$")
+def _cad_save(m) -> Optional[Intent]:
+    return ("__cad_save", {}, "")
+
+
+@rule(r"^(?:reset|revert|discard|throw away)\s+(?:the\s+|my\s+|all\s+)?(?:changes|edits|parameters|dimensions)[.!]?$")
+def _cad_reset(m) -> Optional[Intent]:
+    return ("__cad_reset", {}, "")
+
+
+@rule(r"^(?:what can i (?:change|edit|adjust)|(?:list|show)(?: me)? (?:the )?(?:parameters|params|dimensions|variables)"
+      r"|parameters|dimensions)[.!?]?$")
+def _cad_params(m) -> Optional[Intent]:
+    return ("__cad_params", {}, "")
+
+
+@rule(r"^(?:done|done adjusting|that's good|that is good|stop adjusting|finished|let go)[.!]?$")
+def _cad_done(m) -> Optional[Intent]:
+    return ("__cad_done", {}, "")
 
 
 # ------------------------------------------------------------------ models

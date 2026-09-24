@@ -140,11 +140,15 @@
 
     /* ------------------------------------------------------------ loading */
 
-    async load(model) {
+    /* opts.url + opts.keepView: a live-edit rebuild. It keeps the camera and
+       the first load's centre and scale, so a dimension made longer actually
+       looks longer instead of being re-framed back to the same size. */
+    async load(model, opts = {}) {
       if (!this._setup()) return false;
-      this.setStatus(`loading ${model.name}…`);
+      const rebuild = !!(opts.url && opts.keepView && this._norm && this.model === model);
+      if (!rebuild) this.setStatus(`loading ${model.name}…`);
       try {
-        const res = await fetch('/api/model?path=' + encodeURIComponent(model.path));
+        const res = await fetch(opts.url || ('/api/model?path=' + encodeURIComponent(model.path)));
         if (!res.ok) throw new Error(await res.text());
         const { positions, normals } = parseSTL(await res.arrayBuffer());
 
@@ -161,7 +165,9 @@
         box.getCenter(centre);
         const size = new THREE.Vector3();
         box.getSize(size);
-        const scale = 2 / Math.max(size.x, size.y, size.z, 1e-6);
+        let scale = 2 / Math.max(size.x, size.y, size.z, 1e-6);
+        if (rebuild) { centre.copy(this._norm.centre); scale = this._norm.scale; }
+        else this._norm = { centre: centre.clone(), scale };
         geometry.translate(-centre.x, -centre.y, -centre.z);
         geometry.scale(scale, scale, scale);
 
@@ -181,9 +187,14 @@
           new THREE.LineBasicMaterial({ color: 0xb6f2ff, transparent: true, opacity: 0.28 }));
         this.mesh.add(edges);
 
+        const fresh = this.model !== model || !rebuild;
         this.model = model;
         const tris = positions.length / 9;
         this.setStatus('');
+        // Tell the assistant what is on screen: a .scad part becomes editable.
+        if (fresh && !rebuild && global.bus && global.bus.send) {
+          global.bus.send({ type: 'model_loaded', path: model.path });
+        }
         $('#model-name').textContent = model.name.replace(/_/g, ' ');
         $('#model-meta').textContent =
           `${model.project} · ${tris.toLocaleString()} triangles · ` +
@@ -256,6 +267,25 @@
       const twoFingers = nExt === 2 && ext[0] && ext[1];
       const pointing = !pinching && ext[0] && !ext[1] && !ext[2] && !ext[3];
       const openHand = !pinching && nExt === 4;
+
+      // A dimension picked by voice ("adjust the rim") is dragged with a pinch:
+      // up makes it bigger, down smaller, across its whole range in a hand-height.
+      if (this.editParam && pinching) {
+        this.spin = false;
+        const p = this.editParam;
+        if (!this.grab || this.grab.mode !== 'param') {
+          this.grab = { mode: 'param', y: hand.palm[1], v: +p.value };
+          return;
+        }
+        const span = (p.hi - p.lo) || Math.abs(+p.value) || 1;
+        let v = this.grab.v + (this.grab.y - hand.palm[1]) * span * 1.2;
+        v = Math.max(p.lo, Math.min(p.hi, v));
+        if (p.step) v = Math.round(v / p.step) * p.step;
+        v = +v.toFixed(6);
+        if (v !== +p.value) this._paramInput(p.name, v, true);
+        return;
+      }
+      if (this.grab && this.grab.mode === 'param') this.grab = null;
       // Openness: the mean thumb-to-finger gap in hand-scales. It falls as the
       // fingers come together, whether they curl or bunch toward the thumb.
       const openness = gaps.slice(0, 4).reduce((a, b) => a + b, 0) / 4;
@@ -341,6 +371,107 @@
       } else {
         this.grab = null;
       }
+    }
+
+    /* ------------------------------------------------------ live editing */
+
+    _panel() {
+      let el = $('#model-params');
+      if (!el) {
+        el = document.createElement('aside');
+        el.id = 'model-params';
+        el.className = 'model-params';
+        el.hidden = true;
+        this.el.appendChild(el);
+      }
+      return el;
+    }
+
+    /* The .scad on screen and its dimensions; an empty list hides the panel. */
+    setParams(params, name, dirty) {
+      this.params = params || [];
+      this.editParam = null;
+      const el = this._panel();
+      if (!this.params.length) { el.hidden = true; el.innerHTML = ''; return; }
+      const rows = this.params.map((p, i) => {
+        const val = p.kind === 'bool'
+          ? `<input type="checkbox" data-i="${i}" ${p.value ? 'checked' : ''}>`
+          : `<input type="range" data-i="${i}" min="${p.lo}" max="${p.hi}" step="${p.step || 'any'}" value="${p.value}">`;
+        return `<div class="param" data-name="${p.name}" title="${(p.comment || '').replace(/"/g, '&quot;')}">
+          <label><span>${p.spoken}</span><b>${this._fmt(p)}</b></label>${val}</div>`;
+      }).join('');
+      el.innerHTML = `<header><span>EDIT · ${String(name || '').replace(/_/g, ' ')}</span><i>${dirty ? 'unsaved' : 'saved'}</i></header>` +
+        `<div class="params">${rows}</div><footer>say "set rim to 3" · "make it thicker" · "undo" · "save"</footer>`;
+      el.hidden = false;
+      el.querySelectorAll('input').forEach((input) => {
+        const p = this.params[+input.dataset.i];
+        const on = () => this._paramInput(p.name, p.kind === 'bool' ? input.checked : +input.value, false);
+        input.addEventListener('input', on);
+        input.addEventListener('change', () => { this._lastSend = 0; on(); });
+      });
+    }
+
+    updateParams(params, dirty) {
+      const el = this._panel();
+      (params || []).forEach((p) => {
+        const mine = (this.params || []).find((q) => q.name === p.name);
+        if (!mine) return;
+        // A value being dragged right now is the source of truth, not the echo.
+        const dragging = this.grab && this.grab.mode === 'param' && this.editParam === mine;
+        if (!dragging) mine.value = p.value;
+        const row = el.querySelector(`.param[data-name="${p.name}"]`);
+        if (!row) return;
+        row.querySelector('b').textContent = this._fmt(mine);
+        row.classList.toggle('changed', p.value !== p.base);
+        const input = row.querySelector('input');
+        if (input && document.activeElement !== input && !dragging) {
+          if (input.type === 'checkbox') input.checked = !!p.value; else input.value = p.value;
+        }
+      });
+      const tag = el.querySelector('header i');
+      if (tag) tag.textContent = dirty ? 'unsaved' : 'saved';
+    }
+
+    selectParam(name) {
+      this.editParam = (this.params || []).find((p) => p.name === name) || null;
+      const el = this._panel();
+      el.querySelectorAll('.param').forEach((row) => {
+        const on = row.dataset.name === name;
+        row.classList.toggle('picked', on);
+        if (on) row.scrollIntoView({ block: 'nearest' });
+      });
+      if (this.editParam) el.hidden = false;
+    }
+
+    setBuilding(on) {
+      this._panel().classList.toggle('building', !!on);
+    }
+
+    _fmt(p) {
+      if (p.kind === 'bool') return p.value ? 'on' : 'off';
+      const v = +p.value;
+      return Math.abs(v) >= 100 ? v.toFixed(1) : +v.toPrecision(4) + '';
+    }
+
+    /* Send at most every 120 ms while dragging; the final value always goes. */
+    _paramInput(name, value, fromHand) {
+      const p = (this.params || []).find((q) => q.name === name);
+      if (!p) return;
+      p.value = value;
+      const row = this._panel().querySelector(`.param[data-name="${name}"]`);
+      if (row) {
+        row.querySelector('b').textContent = this._fmt(p);
+        const input = row.querySelector('input');
+        if (fromHand && input && input.type === 'range') input.value = value;
+      }
+      const now = performance.now();
+      clearTimeout(this._sendTimer);
+      const send = () => {
+        this._lastSend = performance.now();
+        if (global.bus && global.bus.send) global.bus.send({ type: 'cad_param', name, value: p.value });
+      };
+      if (!this._lastSend || now - this._lastSend > 120) send();
+      else this._sendTimer = setTimeout(send, 130);
     }
 
     reset() {
