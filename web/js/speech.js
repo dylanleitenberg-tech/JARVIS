@@ -35,6 +35,7 @@
       this.supported = !!SR;
       this.listening = false;   // recognition is running
       this.awake = false;       // a wake word has been heard recently
+      this.addressed = false;   // the utterance in progress began while awake
       this.speaking = false;
       this.wantListening = false;
       this.lastStart = 0;
@@ -195,6 +196,7 @@
       this.lastStart = now;
 
       const rec = new SR();
+      this.addressed = false;       // an unfinished utterance ends with its session
       rec.lang = this.cfg.locale;
       rec.continuous = true;
       rec.interimResults = true;
@@ -212,11 +214,21 @@
           if (!text) continue;
           if (result.isFinal) {
             const alts = Array.from(result).map((a) => a.transcript.trim());
-            this._handle(text, alts);
+            const addressed = this.addressed;
+            this.addressed = false;
+            this._handle(text, alts, addressed);
           } else {
             this.onHeard(text, false);
             // Waking on an interim result buys ~300 ms of perceived latency.
             if (!this.awake && this._findWake(text) !== null) this._wake();
+            // Whether he was talking to J.A.R.V.I.S. is decided when the words
+            // start, not when Chrome finishes them. "Jarvis", a pause, then a
+            // long command arrives as two finals, and the second one lands
+            // after the wake window has closed: replaying his recorded voice,
+            // "Jarvis ... make the rear bell nozzle a cone instead of a set of
+            // tubings" finalised 11 s after the wake word and was dropped here,
+            // before the server could log it.
+            if (this.awake) this.addressed = true;
           }
         }
       };
@@ -267,7 +279,7 @@
       }, this.cfg.command_timeout * 1000);
     }
 
-    _handle(text, alts) {
+    _handle(text, alts, addressed) {
       this.onHeard(text, true);
 
       const lower = text.toLowerCase();
@@ -289,9 +301,9 @@
         return;
       }
 
-      if (this.awake) {
+      if (this.awake || addressed) {
         this.onCommand(text, { alts });
-        this._resetWakeTimer();
+        this._wake();
       }
     }
 
@@ -313,11 +325,18 @@
         utter.volume = this.cfg.volume;
         utter.lang = this.voice ? this.voice.lang : 'en-GB';
 
+        // A question is waiting on an answer, and the answer comes without his
+        // name on it. The wake window was opened by his command, so by the time
+        // the model has thought and the question has been spoken it has
+        // usually closed: open a fresh one when he can actually reply.
+        const asked = /\?["')\s]*$/.test(text);
+
         let envelope = null;
         const finish = () => {
           clearInterval(envelope);
           this.onLevel(0);
           this.speaking = false;
+          if (asked) { this.awake = true; this._resetWakeTimer(); }
           this.onState(this.awake ? 'listening' : 'standby');
           if (wasListening) setTimeout(() => this._arm(), 160);
           resolve();
