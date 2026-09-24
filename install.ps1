@@ -32,7 +32,7 @@ function Install-Jarvis {
     if ($env:JARVIS_UNINSTALL -eq '1') {
         Step 'Removing J.A.R.V.I.S.'
         Get-CimInstance Win32_Process -Filter "Name like 'python%'" |
-            Where-Object { $_.CommandLine -like '*jarvis.main*' } |
+            Where-Object { $_.CommandLine -like "*$Dest*" } |     # this install's only
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Remove-Item -Force -ErrorAction SilentlyContinue $StartMenu, $DesktopLink
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $Dest

@@ -61,7 +61,7 @@ BIN="$HOME/.local/bin/jarvis"
 # ------------------------------------------------------------------ uninstall
 if [ "$UNINSTALL" = 1 ]; then
   step "Removing J.A.R.V.I.S."
-  pkill -f "jarvis.main" 2>/dev/null || true
+  pkill -f "$DEST/.venv" 2>/dev/null || true      # this install's processes only
   [ "$OS" = Darwin ] && rm -rf "$APP" && say "removed $APP"
   rm -f "$DESKTOP_FILE" "$BIN"
   rm -rf "$DEST" && say "removed $DEST"
