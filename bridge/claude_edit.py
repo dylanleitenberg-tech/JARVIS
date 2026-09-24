@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,8 +25,17 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from claude_code import extract_json, find_binary  # noqa: E402
 
-TIMEOUT = float(os.environ.get("JARVIS_CLAUDE_EDIT_TIMEOUT", "180"))
-MODEL = os.environ.get("JARVIS_CLAUDE_EDIT_MODEL", "sonnet")
+TIMEOUT = float(os.environ.get("JARVIS_CLAUDE_EDIT_TIMEOUT", "300"))
+# Opus 5.5, because this is the one call in the system that has to reason
+# about shape: which named solids a phrase like "the nozzle skirt" covers,
+# what is attached to what, and which anchor keeps a joint closed. Sonnet
+# answered "make the bell 30% bigger" by scaling overlapping selections in
+# successive edits and tore the assembly into a starburst.
+#
+# The id is claude-opus-5-5. Note the hyphens: "claude-opus-5.5" and
+# "opus-5.5" are both rejected by the CLI, the first as a model that may not
+# exist and the second as absent from the version's catalogue.
+MODEL = os.environ.get("JARVIS_CLAUDE_EDIT_MODEL", "claude-opus-5-5")
 
 COMMON = """
 You edit CAD for a voice assistant. The user spoke a change; make exactly that
@@ -85,9 +95,43 @@ fits the description, ask which. Return
 """.strip()
 
 
+VERIFY = """
+You are looking at renders of a CAD model from a few angles, taken just after
+an edit was applied. Judge ONLY whether the edit did what was asked without
+breaking the model. Reply with ONE JSON object, no prose, no code fence:
+  {"wrong": false}                                     it looks right
+  {"wrong": true, "say": "<what is wrong, one sentence>"}
+
+Say it is wrong only for something you can SEE: a part detached or floating,
+a section obviously the wrong size relative to the rest, geometry turned
+inside out, a hole or feature in the wrong place, parts intersecting that
+should not, a shape that has exploded into spikes or shards. Faceting, render
+quality, lighting, background and colour are not faults. If the change is
+simply too subtle to see, that is not wrong — say false. You are the last
+check before the user is told it worked, so do not invent problems, and do
+not pass something visibly broken.
+""".strip()
+
+
 def main() -> int:
     req = json.load(sys.stdin)
     mode = req.get("mode")
+    if mode == "verify":
+        images = [p for p in (req.get("images") or []) if os.path.exists(p)]
+        if not images:
+            print(json.dumps({"wrong": False}))
+            return 0
+        listed = "\n".join(f"  {os.path.basename(p)}" for p in images)
+        prompt = (f"Change that was requested: {req.get('request')}\n"
+                  f"What the editor said it did: {req.get('said')}\n\n"
+                  f"Read these renders and judge the result:\n{listed}")
+        # Read, and the renders copied into the sandbox rather than reached
+        # for where they live. This is the only place in the system where the
+        # model is given a tool at all, so it gets the narrowest version of
+        # it: one directory, containing nothing but the pictures.
+        return _run(prompt, VERIFY, tools="Read", fallback={"wrong": False},
+                    attach=images)
+
     if mode == "scad":
         system = "\n\n".join([COMMON, SCAD])
         prompt = (f"File: {req.get('file')}\n\n----- source -----\n{req.get('source', '')}\n----- end -----\n\n"
@@ -106,24 +150,42 @@ def main() -> int:
         prompt += (f"\n\nYour previous attempt failed.\nAttempt:\n{req.get('previous', '')}\n"
                    f"Error:\n{req['error']}\nFix it.")
 
+    return _run(prompt, system)
+
+
+def _run(prompt: str, system: str, tools: str = "",
+         fallback: dict = None, attach: list = None) -> int:
+    """One isolated call, and print whatever comes back.
+
+    `fallback` is what to print when the call cannot be made or times out.
+    Verification passes {"wrong": false} there on purpose: a check that
+    cannot run must not become a check that fails everything.
+    """
     with tempfile.TemporaryDirectory(prefix="jarvis-edit-") as sandbox:
+        for src in attach or []:
+            try:
+                shutil.copyfile(src, os.path.join(sandbox, os.path.basename(src)))
+            except OSError:
+                pass
         try:
             proc = subprocess.run(
                 [find_binary(), "-p", prompt, "--system-prompt", system,
                  "--output-format", "text", "--model", MODEL,
-                 "--setting-sources", "", "--strict-mcp-config", "--allowed-tools", ""],
+                 "--setting-sources", "", "--strict-mcp-config",
+                 "--allowed-tools", tools],
                 capture_output=True, text=True, timeout=TIMEOUT, cwd=sandbox)
         except subprocess.TimeoutExpired:
-            print(json.dumps({"say": "That edit took too long; I stopped.", "failed": True}))
+            print(json.dumps(fallback or {"say": "That edit took too long; I stopped.",
+                                          "failed": True}))
             return 0
     if proc.returncode != 0:
         tail = (proc.stderr or "").strip().splitlines()
-        print(json.dumps({"say": "My link to Claude Code failed.", "failed": True,
-                          "error": tail[-1] if tail else ""}))
+        print(json.dumps(fallback or {"say": "My link to Claude Code failed.", "failed": True,
+                                      "error": tail[-1] if tail else ""}))
         return 0
     out = extract_json(proc.stdout)
     if not isinstance(out, dict):
-        out = {"say": str(out)[:300]}
+        out = fallback or {"say": str(out)[:300]}
     print(json.dumps(out))
     return 0
 

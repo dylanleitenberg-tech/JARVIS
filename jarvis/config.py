@@ -30,9 +30,20 @@ DEFAULTS = {
         "always_listening": True,
         # Seconds of silence after a command before the utterance is dispatched.
         "command_timeout": 6.0,
-        "voice_hint": "Daniel",  # en-GB male; matched loosely against browser voices
-        "rate": 1.02,
-        "pitch": 0.85,
+        # Empty means "pick the best available" — Google's network voices
+        # first, then a premium or enhanced British male, then Daniel. Naming
+        # one here overrides the ranking entirely. The stock Mac set is poor;
+        # System Settings > Accessibility > Spoken Content > System Voice >
+        # Manage Voices has far better ones, and they are free.
+        "voice_hint": "",
+        # Slower than speech normally is, because an assistant that sounds
+        # unhurried sounds certain. But NOT pitched down: a speech synthesiser
+        # shifts pitch by resampling, and on a basic voice — which is all this
+        # Mac has, with no premium voice installed — that does not deepen it,
+        # it makes it warble. Depth has to come from the voice itself, and
+        # this is the setting to leave alone until a better one is installed.
+        "rate": 0.92,
+        "pitch": 1.0,
         "volume": 1.0,
         "locale": "en-US",
     },
@@ -162,6 +173,32 @@ DEFAULTS = {
         # Used instead of `model` when the backend is ollama, so switching
         # backends does not mean editing the model name too.
         "local_model": "qwen3:8b",
+        # The model that writes geometry edits, through the Claude Code login.
+        # Opus by default: this is the one call that has to reason about shape
+        # rather than words — which named solids "the nozzle skirt" covers,
+        # what is attached to what, which anchor keeps a joint closed. It is
+        # slower, and worth it, because a wrong edit costs a rebuild and an
+        # undo. "sonnet" if you want the speed back.
+        # Pinned rather than the "opus" alias: the alias follows the latest
+        # Opus, and a geometry editor changing under you is how a setup that
+        # worked yesterday starts producing different edits today. Set it to
+        # "opus" to track the newest instead.
+        "edit_model": "claude-opus-5-5",
+        "edit_timeout": 300.0,
+        # The understanding step — anything the fixed phrases miss. Sonnet,
+        # because this reply is SPOKEN: measured on the same utterance it
+        # answers in 6.3 s where Opus 5.5 takes 14.4, and fourteen seconds of
+        # silence is long enough that you say it again. Set it to
+        # "claude-opus-5-5" if you would rather wait for a better answer.
+        "smart_model": "sonnet",
+        # After an edit applies, photograph the model in the HUD and let the
+        # model look at what it made before the user is told it worked. This
+        # is the difference between a tool that guesses and one that checks:
+        # a bounding box cannot see a part left floating or geometry burst
+        # into spikes. Costs one extra call and a few seconds; a bad edit that
+        # gets through costs a rebuild and an undo.
+        "verify_edits": True,
+        "verify_settle": 1.6,      # seconds for the viewer to rebuild first
         # How long a local reasoning model may deliberate before answering:
         # none | low | medium | high. Defaults to "none" on ollama, where
         # thinking is the difference between a 1.4 s reply and an 8 s one.
@@ -185,6 +222,18 @@ DEFAULTS = {
             "something on the computer, call the matching tool and then confirm in a few words. "
             "If a request is ambiguous, ask one short question. Never narrate what you are about to do."
         ),
+    },
+    "watch": {
+        # Speaking without being spoken to. The hard part is not noticing —
+        # the telemetry loop has always had these numbers — it is staying
+        # quiet. A watch fires when a condition BECOMES true, never while it
+        # is true, and nothing speaks twice until it clears and comes back.
+        "enabled": True,
+        "min_gap": 90.0,            # never two unprompted remarks inside this
+        "battery_low": 20.0,
+        "battery_critical": 10.0,
+        "disk_low_gb": 12.0,
+        "unsaved_after_min": 12.0,  # edits live in memory until you say save
     },
     "safety": {
         # Actions that need a spoken or gestural confirmation before they run.

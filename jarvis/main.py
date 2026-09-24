@@ -76,6 +76,20 @@ class Jarvis:
         from .models import ModelIndex
         self.models = ModelIndex(cfg.get("models", {}).get("roots", []),
                                  int(cfg.get("models", {}).get("max_files", 4000)))
+        from .memory import Memory
+        from .knowledge import Knowledge
+        self.memory = Memory(config_module.ROOT / "logs" / "memory.json")
+        self.knowledge = Knowledge(cfg.get("models", {}).get("roots", []))
+        from .watch import Watcher
+        self.watcher = Watcher(cfg)
+        # A thing that has never worked has not been lost; these keep startup
+        # from being announced as a series of failures.
+        self._had_vision = False
+        self._had_control = False
+        self._brain_was_ready = False
+        self._dirty_since = 0.0
+        self._voices: List[str] = []       # what the browser reports it has
+        self._voice: Optional[str] = None  # and which one it settled on
         intents.model_lookup = self.models.best
         # Live parameter editing of the .scad model on screen (cadedit.py).
         self.cad_edit = None
@@ -83,6 +97,7 @@ class Jarvis:
         intents.param_resolve = lambda name: self.cad_edit.resolve(name) if self.cad_edit else (None, [])
         self._cad_pending: Optional[Dict[str, Any]] = None     # a question JARVIS asked
         self._shown = None                                     # path of the model on screen
+        self._captures: Dict[str, asyncio.Future] = {}         # in-flight look-at-it requests
         self.step_edit = None                                  # StepSession for a STEP on screen
         self._modify_lock = asyncio.Lock()
         self._modify_pending: Optional[Dict[str, Any]] = None  # an edit waiting on an answer
@@ -483,6 +498,12 @@ class Jarvis:
                 "typed_commands": stat["text_utterances"],
                 "seconds_since_voice": ago(heard),
                 "last_heard": stat["last_heard"],
+                # What he is actually speaking with, as opposed to what the
+                # config asks for. The two diverge silently whenever a voice
+                # is named that this browser does not have.
+                "voice_wanted": self.cfg["speech"].get("voice_hint") or "(best available)",
+                "voice_using": getattr(self, "_voice", None),
+                "voices_available": len(getattr(self, "_voices", [])),
             },
             "hands": {
                 "armed": bool(self.gestures and self.gestures.armed),
@@ -543,6 +564,7 @@ class Jarvis:
                                          or macos.relay_available())
                 status["awake"] = self.awake
                 await self.bus.publish("telemetry", **status)
+                await self._maybe_speak_up(status)
             except Exception as exc:
                 await self.bus.publish("log", level="warn", text=f"telemetry: {exc}")
             await asyncio.sleep(3.0)
@@ -551,6 +573,30 @@ class Jarvis:
 
     async def on_hud_message(self, msg: dict, ws) -> None:
         kind = msg.get("type")
+
+        if kind == "voice_heard":
+            names = [str(n) for n in (msg.get("names") or [])]
+            await self.bus.publish("log", level="info",
+                                   text="voices: " + ", ".join(names))
+            return
+
+        if kind == "voice_set":
+            name = msg.get("name")
+            if not name:
+                await self.say(f"I have no voice called {msg.get('asked')}.")
+                return
+            # Kept across restarts, or choosing one is a ritual you repeat
+            # every launch.
+            config_module.save_patch({"speech": {"voice_hint": name}})
+            self.cfg["speech"]["voice_hint"] = name
+            self.memory.remember(f"Use the '{name}' speech voice.", source="user")
+            return
+
+        if kind == "capture":
+            waiter = self._captures.pop(str(msg.get("id", "")), None)
+            if waiter is not None and not waiter.done():
+                waiter.set_result(list(msg.get("shots") or []))
+            return
 
         if kind == "utterance":
             await self.handle_utterance(str(msg.get("text", "")), msg.get("source", "voice"))
@@ -619,6 +665,14 @@ class Jarvis:
                     return
                 self._schedule_rebuild(name)
         elif kind == "ready":
+            self._voices = [str(v) for v in (msg.get("voices") or [])]
+            self._voice = msg.get("voice")
+            want = str(self.cfg["speech"].get("voice_hint") or "").strip()
+            if want and self._voices and not any(
+                    want.lower() in v.lower() for v in self._voices):
+                await self.bus.publish(
+                    "log", level="warn",
+                    text=f"no voice called '{want}' in this browser; using {self._voice}")
             await self.greet()
         elif kind == "ping":
             await ws.send_json({"type": "pong", "t": time.time()})
@@ -755,6 +809,15 @@ class Jarvis:
                 else:
                     await self.say("Gesture tracking is not running.")
                 return
+            if action == "__voice_audition":
+                await self.say("Here are the voices I have. Say use, and the name.")
+                await self.bus.publish("voice_audition", limit=6,
+                                       sample="Good evening, Sir. All systems nominal.")
+                return
+            if action == "__voice_use":
+                await self.bus.publish("voice_use", name=str(args.get("name", "")))
+                return
+
             if action == "__open_source":
                 query = str(args.get("query", "")).strip()
                 if not await self.open_source(query, str(args.get("app", "")), source):
@@ -941,6 +1004,16 @@ class Jarvis:
         from .models import OPENSCAD
         path = self.models.resolve(raw_path) if raw_path else None
         self._shown = path
+        # What is on screen decides which project's notes are worth offering,
+        # and is worth remembering for "what was I looking at yesterday".
+        if path is not None:
+            hit = next((m for m in self.models.scan() if m["path"] == str(path)), None)
+            self.knowledge.set_focus(str(hit["project"]) if hit else None)
+            self.memory.note("model", f"looking at {path.stem.replace('_', ' ')}",
+                             file=path.name, project=hit["project"] if hit else None)
+            self.memory.save()
+        else:
+            self.knowledge.set_focus(None)
         if path is not None and path.suffix.lower() in (".step", ".stp"):
             self.cad_edit = None
             await self._start_step_edit(path)
@@ -1166,14 +1239,130 @@ class Jarvis:
 
     # ------------------------------------------------ geometry edits (Claude)
 
+    async def _maybe_speak_up(self, status: Dict[str, Any]) -> None:
+        """Say the one thing worth interrupting for. Usually nothing.
+
+        The telemetry loop has always gathered every number this needs and
+        published them to the HUD, where they sat as digits nobody was
+        watching. The missing part was never the data.
+        """
+        # "Had" rather than "has": a thing that has never worked has not been
+        # lost, and announcing its absence at startup is noise, not news.
+        if status.get("vision_online"):
+            self._had_vision = True
+        if status.get("can_control"):
+            self._had_control = True
+        brain_ready = self.brain.status == "ready"
+        if brain_ready:
+            self._brain_was_ready = True
+
+        unsaved_for = 0.0
+        session = self.step_edit or self.cad_edit
+        if session is not None and getattr(session, "dirty", False):
+            self._dirty_since = self._dirty_since or time.time()
+            unsaved_for = (time.time() - self._dirty_since) / 60.0
+        else:
+            self._dirty_since = 0.0
+
+        state = dict(status)
+        state.update(had_vision=self._had_vision, had_control=self._had_control,
+                     brain_ready=brain_ready, brain_was_ready=self._brain_was_ready,
+                     unsaved_for=unsaved_for,
+                     # Never talk over speech, thinking, or a running edit.
+                     busy=(self._modify_lock.locked() or not self.awake
+                           or bool(self._cad_pending or self._modify_pending
+                                   or self._smooth_pending)))
+        line = self.watcher.tick(state)
+        if not line:
+            return
+        self._activity("unprompted", said=line)
+        self.memory.note("noticed", line)
+        await self.say(line)
+
+    async def look_at_model(self, views: int = 3, timeout: float = 8.0) -> List[str]:
+        """Ask the HUD to photograph what is on screen. Returns PNG paths.
+
+        The viewer already holds the geometry and a renderer; there is no
+        second, headless renderer to keep in step with the first, and no
+        question of the two disagreeing. What comes back is what the user is
+        looking at.
+        """
+        import base64
+        import pathlib
+        import uuid
+
+        if self.server is None or not self.server.clients:
+            return []
+        ident = uuid.uuid4().hex[:12]
+        waiter: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._captures[ident] = waiter
+        await self.bus.publish("capture_request", id=ident, views=views, size=640)
+        try:
+            shots = await asyncio.wait_for(waiter, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._captures.pop(ident, None)
+            return []
+
+        out = config_module.ROOT / "logs" / "looks"
+        out.mkdir(parents=True, exist_ok=True)
+        # One set at a time: these are working files, not a gallery.
+        for stale in out.glob("*.png"):
+            stale.unlink(missing_ok=True)
+        paths = []
+        for i, shot in enumerate(shots):
+            if not isinstance(shot, str) or "," not in shot:
+                continue
+            try:
+                raw = base64.b64decode(shot.split(",", 1)[1])
+            except (ValueError, TypeError):
+                continue
+            path = out / f"view{i}.png"
+            path.write_bytes(raw)
+            paths.append(str(path))
+        return paths
+
+    async def _verify_edit(self, request: str, said: str) -> Optional[str]:
+        """Look at the result and say what is wrong with it, or None.
+
+        This is the difference between a tool that guesses and one that
+        checks. The numeric check catches an assembly that changed size by a
+        factor; it cannot see a part left floating, a hole in the wrong face,
+        or a nozzle turned inside out. Those are obvious in a picture and
+        invisible in a bounding box.
+        """
+        if not self.cfg["ai"].get("verify_edits", True):
+            return None
+        # Let the viewer finish rebuilding and settle before the shot.
+        await asyncio.sleep(float(self.cfg["ai"].get("verify_settle", 1.6)))
+        shots = await self.look_at_model()
+        if not shots:
+            return None
+        out = await self._claude_edit({"mode": "verify", "request": request,
+                                       "said": said, "images": shots})
+        if not out.get("wrong"):
+            return None
+        problem = str(out.get("say") or "").strip()
+        self._activity("verify", request=request, problem=problem)
+        return problem or None
+
     async def _claude_edit(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         import pathlib
         import sys as _sys
         bridge = pathlib.Path(__file__).resolve().parents[1] / "bridge" / "claude_edit.py"
 
+        # ai.edit_model overrides the bridge's default, so the model doing the
+        # geometry can be changed in jarvis.json rather than only by env.
+        env = dict(os.environ)
+        chosen = str(self.cfg["ai"].get("edit_model") or "").strip()
+        if chosen:
+            env["JARVIS_CLAUDE_EDIT_MODEL"] = chosen
+        timeout = float(self.cfg["ai"].get("edit_timeout") or 300)
+        env["JARVIS_CLAUDE_EDIT_TIMEOUT"] = str(timeout)
+
         def call() -> Dict[str, Any]:
             proc = subprocess.run([_sys.executable, str(bridge)], input=json.dumps(payload),
-                                  capture_output=True, text=True, timeout=240)
+                                  capture_output=True, text=True,
+                                  timeout=timeout + 60, env=env)
             lines = [l for l in proc.stdout.splitlines() if l.strip().startswith("{")]
             return json.loads(lines[-1]) if lines else {"say": "The edit came back empty.", "failed": True}
         return await asyncio.to_thread(call)
@@ -1202,6 +1391,13 @@ class Jarvis:
                     "Open a model first."
             await self.bus.publish("cad_done")
             self._activity("modify_end", request=request, said=line)
+            # The episode is what was asked for, not what was said back: the
+            # request is the user's own words and is what they will use to
+            # find it again.
+            if self._shown is not None:
+                self.memory.note("edit", f"{request} on {self._shown.stem.replace('_', ' ')}",
+                                 file=self._shown.name, said=line)
+                self.memory.save()
             await self.say(line)
             return line
 
@@ -1283,6 +1479,21 @@ class Jarvis:
                 key = st.key()
                 await self.bus.publish("model_update", url=f"/api/model_edit?key={key}", dirty=True)
                 await self._publish_step_state()
+
+                # Now look at it. The numeric check catches an assembly that
+                # changed size by a factor; it cannot see a part left floating,
+                # a bell turned inside out, or geometry burst into spikes.
+                # Those are obvious in a picture and invisible in a bounding
+                # box — which is exactly how the starburst got through.
+                seen = await self._verify_edit(request, str(out.get("say") or ""))
+                if seen and attempt == 0:
+                    await self.bus.publish("log", level="warn",
+                                           text=f"that looked wrong: {seen}")
+                    st.undo()
+                    await self._publish_step_state()
+                    error, previous = (f"The edit applied, but the result looks wrong: {seen} "
+                                       f"Rewrite the script so this does not happen."), script
+                    continue
                 # Spoken: Claude's sentence, which names the parts. The exact
                 # list of changed parts goes to the panel and the activity log.
                 said = str(out.get("say") or "Done.")
@@ -1296,19 +1507,42 @@ class Jarvis:
         almost always a wrong axis or wrong units (a nozzle bell revolved flat
         came out 4 m wide). Returns the problem in numbers, or None."""
         boxes = next((n for v, n in touched if v == "_boxes"), None)
-        if not boxes or not boxes.get("removed") or not boxes.get("added"):
+        if not boxes:
             return None
-        r, a = boxes["removed"], boxes["added"]
-        issues = []
+
+        if boxes.get("removed") and boxes.get("added"):
+            r, a = boxes["removed"], boxes["added"]
+            issues = []
+            for k, ax in enumerate("xyz"):
+                rs, as_ = r[k + 3] - r[k], a[k + 3] - a[k]
+                if as_ > rs * 1.25 + 20:
+                    issues.append(f"{ax}: new part spans {as_:.0f} mm where the removed parts spanned {rs:.0f} mm")
+            if issues:
+                return ("The replacement is much bigger than what it replaced (" + "; ".join(issues) +
+                        f"). Removed parts bbox {[round(v) for v in r]}, new part bbox {[round(v) for v in a]}. "
+                        "Check the axis and the radii/heights and fix the script.")
+
+        # A stretch, scale or move removes nothing and adds nothing, so the
+        # check above never saw one — and an assembly torn apart by a pair of
+        # compounding 30% stretches passed as cleanly as a no-op. The whole
+        # assembly is measured instead. The threshold is deliberately loose:
+        # this is for the edit that has gone wrong by a factor, not for the
+        # one that is 10% off.
+        before, after = boxes.get("before"), boxes.get("after")
+        if not before or not after:
+            return None
+        grew = []
         for k, ax in enumerate("xyz"):
-            rs, as_ = r[k + 3] - r[k], a[k + 3] - a[k]
-            if as_ > rs * 1.25 + 20:
-                issues.append(f"{ax}: new part spans {as_:.0f} mm where the removed parts spanned {rs:.0f} mm")
-        if not issues:
+            bs, as_ = before[k + 3] - before[k], after[k + 3] - after[k]
+            if bs > 1.0 and as_ > bs * 1.6 + 20:
+                grew.append(f"{ax}: {bs:.0f} mm to {as_:.0f} mm ({as_ / bs:.1f} times)")
+        if not grew:
             return None
-        return ("The replacement is much bigger than what it replaced (" + "; ".join(issues) +
-                f"). Removed parts bbox {[round(v) for v in r]}, new part bbox {[round(v) for v in a]}. "
-                "Check the axis and the radii/heights and fix the script.")
+        return ("That script changed the size of the whole assembly far more than the request "
+                "asked for (" + "; ".join(grew) + "). A change to one feature should not resize "
+                "the assembly. Check that the selection catches only the parts meant, that the "
+                "anchor is right, and that you are not scaling parts a previous edit already "
+                "scaled. Fix the script.")
 
     @staticmethod
     def _touched_line(touched) -> str:
@@ -1437,7 +1671,30 @@ class Jarvis:
     # The model gets these while an editable part is on screen, with the part's
     # dimensions in its instructions, so "make the glasses fit a wider face" can
     # become the right edits, or a question if it cannot tell.
+    _MEMORY_TOOLS = [
+        {"name": "remember",
+         "description": "Keep something across sessions: a correction, a preference, a fact about "
+                        "a part or the project that you should not have to be told again. Use it "
+                        "when the user says to remember something, and when they correct you. "
+                        "Write it as one self-contained sentence.",
+         "input_schema": {"type": "object", "properties": {"text": {"type": "string"}},
+                          "required": ["text"]}},
+        {"name": "forget",
+         "description": "Drop remembered facts matching a phrase. Use when the user says to "
+                        "forget something, or when something remembered turns out to be wrong.",
+         "input_schema": {"type": "object", "properties": {"about": {"type": "string"}},
+                          "required": ["about"]}},
+    ]
+
     def _cad_tools(self):
+        """Everything the model gets beyond the fixed registry: what is on
+        screen, what is remembered, and what is known about the project."""
+        tools, context = self._cad_tools_for_model()
+        tools = list(tools) + list(self._MEMORY_TOOLS)
+        blocks = [b for b in (context, self.memory.brief(), self.knowledge.brief()) if b]
+        return tools, "\n\n".join(blocks)
+
+    def _cad_tools_for_model(self):
         s = self.cad_edit
         smooth = {"name": "model_smooth",
                   "description": "Render the model on screen smoother: smooth shading, and for a STEP "
@@ -1515,6 +1772,15 @@ class Jarvis:
 
     async def _cad_tool_run(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         self._activity("tool", name=name, args=args)
+        if name == "remember":
+            kept = self.memory.remember(str(args.get("text", "")), source="model")
+            if not kept:
+                return {"ok": False, "error": "nothing to remember"}
+            await self.bus.publish("log", level="info", text=f"remembered: {kept}")
+            return {"ok": True, "result": f"remembered: {kept}"}
+        if name == "forget":
+            gone = self.memory.forget(str(args.get("about", "")))
+            return {"ok": True, "result": f"forgot {gone}" if gone else "nothing matched"}
         mapping = {
             "cad_set_dimension": ("__cad_set", {"param": args.get("name"), "value": args.get("value")}),
             "cad_change_dimension": ("__cad_nudge", {"param": args.get("name"),

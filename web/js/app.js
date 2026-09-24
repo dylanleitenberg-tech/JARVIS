@@ -58,7 +58,15 @@
       hud.log('interface error during startup: ' + err.message, 'error');
     } finally {
       hud.boot(!(config && config.hud && config.hud.boot_sequence))
-         .then(() => bus.send({ type: 'ready' }));
+         .then(() => bus.send({
+           type: 'ready',
+           // Which voices the browser actually has, and which one won. The
+           // list lives only in the page, so a voice that is configured but
+           // absent — chosen from the system's list rather than Chrome's —
+           // looked identical to one that was simply being ignored.
+           voices: speech ? speech.listVoices() : [],
+           voice: speech && speech.voice ? speech.voice.name : null,
+         }));
     }
   });
 
@@ -164,6 +172,30 @@
     hud.confirm(pretty,
       () => bus.send({ type: 'confirm', accept: true }),
       () => bus.send({ type: 'confirm', accept: false }));
+  });
+
+  // J.A.R.V.I.S. asking to see the model he just changed. The reply always
+  // goes back, empty shots and all, because a verification step that can hang
+  // waiting for a browser is worse than one that cannot see.
+  // Voices live in the browser, so auditioning and choosing have to happen
+  // here; the server only records which one won.
+  bus.on('voice_audition', async (e) => {
+    if (!speech) return;
+    const names = await speech.audition(e.sample, e.limit || 6);
+    bus.send({ type: 'voice_heard', names });
+  });
+
+  bus.on('voice_use', (e) => {
+    if (!speech) return;
+    const got = speech.useVoice(e.name);
+    bus.send({ type: 'voice_set', name: got ? got.name : null, asked: e.name });
+    if (got) speech.say(`${got.name}. I shall use this one.`);
+  });
+
+  bus.on('capture_request', (e) => {
+    let shots = [];
+    try { shots = viewer ? viewer.capture(e.views || 3, e.size || 640) : []; } catch (_) {}
+    bus.send({ type: 'capture', id: e.id, shots });
   });
 
   bus.on('log', (e) => hud.log(e.text, e.level === 'error' ? 'error'

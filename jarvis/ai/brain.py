@@ -503,9 +503,19 @@ class Brain:
             "history": self.cmd_history[-6:],
         })
 
+        # ai.smart_model chooses the model for the understanding step. It stays
+        # on Sonnet by default and deliberately: this reply is spoken, and
+        # measured on the same utterance Sonnet takes 6.3 s where Opus 5.5
+        # takes 14.4. Fourteen seconds of silence is long enough that you say
+        # it again. Geometry edits are the opposite case and use Opus.
+        env = dict(os.environ)
+        smart = str(self.cfg.get("smart_model") or "").strip()
+        if smart:
+            env["JARVIS_CLAUDE_MODEL"] = smart
+
         def call() -> dict:
             proc = subprocess.run(argv, input=payload, capture_output=True,
-                                  text=True, timeout=90)
+                                  text=True, timeout=90, env=env)
             if proc.returncode != 0:
                 raise RuntimeError(proc.stderr.strip()[:300] or "command failed")
             out = proc.stdout.strip()

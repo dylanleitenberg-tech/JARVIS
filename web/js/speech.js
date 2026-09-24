@@ -50,19 +50,115 @@
 
     /* ------------------------------------------------------------- voice */
 
+    /* The voice is most of the character, and the difference between the
+       voices on a stock Mac is large. Ranked rather than found by first
+       match, because "the first en-GB voice" is how you end up with a novelty
+       voice that happens to sort early, and because the good ones are not
+       installed by default — a name-based search silently settles for Daniel
+       forever once it finds him.
+
+       Order: an explicit voice_hint always wins. Then Google's network voices,
+       which are markedly better than anything local. Then a "premium" or
+       "enhanced" British male, which is what you get after downloading them
+       in System Settings > Accessibility > Spoken Content > Manage Voices.
+       Then plain Daniel, then any British voice, then any English one. */
+    _score(v) {
+      const name = v.name.toLowerCase();
+      const hint = (this.cfg.voice_hint || '').toLowerCase().trim();
+      if (hint && name === hint) return 1000;
+      if (hint && name.includes(hint)) return 900;
+
+      // Novelty voices — Bells, Bubbles, Bad News, Jester and the rest — are
+      // installed on every Mac and must never be chosen by accident.
+      if (/bells|bubbles|boing|jester|wobble|organ|cellos|bahh|good news|bad news|superstar|albert|junior|grandma|grandpa|trinoids|whisper|zarvox/.test(name)) return -100;
+
+      let score = 0;
+      if (/^google/.test(name)) score += 400;             // network, best quality
+      if (/premium|enhanced|siri/.test(name)) score += 300;
+      if (v.lang === 'en-GB') score += 120;
+      else if (v.lang && v.lang.startsWith('en')) score += 40;
+      if (/daniel|arthur|oliver|malcolm|jamie|male/.test(name)) score += 60;
+      if (v.localService === false) score += 20;          // network voices
+      return score;
+    }
+
     _pickVoice() {
       if (!global.speechSynthesis) return;
       const voices = global.speechSynthesis.getVoices();
       if (!voices.length) return;
-      const hint = (this.cfg.voice_hint || '').toLowerCase();
-      this.voice =
-        voices.find((v) => v.name.toLowerCase() === hint) ||
-        voices.find((v) => v.name.toLowerCase().includes(hint)) ||
-        // A British male is the closest match to the character.
-        voices.find((v) => v.lang === 'en-GB' && /daniel|arthur|oliver|male/i.test(v.name)) ||
-        voices.find((v) => v.lang === 'en-GB') ||
-        voices.find((v) => v.lang.startsWith('en')) ||
-        voices[0];
+      const ranked = voices
+        .map((v) => [this._score(v), v])
+        .sort((a, b) => b[0] - a[0]);
+      this.voice = ranked[0][1];
+      this.voiceRanking = ranked.slice(0, 5)
+        .map(([s, v]) => `${v.name} (${v.lang}) ${s}`);
+    }
+
+    /* Speak the same line in each of the best candidates, announcing each by
+       name. Choosing a voice from a written list is guesswork — the names say
+       nothing about how they sound — and I cannot hear them on your behalf.
+       This is the only way to settle it: play them, pick one. */
+    async audition(sample, limit = 6) {
+      if (!global.speechSynthesis) return [];
+      const ranked = global.speechSynthesis.getVoices()
+        .map((v) => [this._score(v), v])
+        .filter(([s]) => s > 0)
+        .sort((a, b) => b[0] - a[0])
+        .slice(0, limit)
+        .map(([, v]) => v);
+
+      const held = this.voice;
+      const names = [];
+      this.auditioning = true;
+      try {
+        for (const v of ranked) {
+          if (!this.auditioning) break;        // interrupted: stop cleanly
+          names.push(v.name);
+          this.voice = v;
+          this.heard = v;                      // what "keep this one" means
+          await this.say(`${v.name}.`);
+          if (!this.auditioning) break;
+          await this.say(sample || 'Good evening, Sir. All systems are nominal.');
+        }
+      } finally {
+        // Always put the old voice back. Without this, stopping the audition
+        // partway left whichever voice happened to be playing in place —
+        // unsaved, so it vanished at the next restart and looked like the
+        // choice had simply been ignored.
+        this.voice = held;
+        this.auditioning = false;
+      }
+      return names;
+    }
+
+    stopAudition() { this.auditioning = false; }
+
+    /* The last voice heard during an audition, for "keep that one" — which is
+       how anyone actually chooses, rather than by recalling the name. */
+    lastHeard() { return this.heard || null; }
+
+    /* Keep one. Returns the voice actually chosen, which may not be the one
+       asked for if the name was misheard — so the caller can say which. */
+    useVoice(name) {
+      if (!global.speechSynthesis) return null;
+      this.stopAudition();
+      const want = String(name || '').toLowerCase().trim();
+      // "keep this one", said while listening to it — no name needed, and no
+      // name remembered either.
+      if (!want || /^(this|that|it|this one|that one|the last one)$/.test(want)) {
+        const heard = this.lastHeard();
+        if (heard) { this.voice = heard; this.cfg.voice_hint = heard.name; }
+        return heard;
+      }
+      const voices = global.speechSynthesis.getVoices();
+      const found = voices.find((v) => v.name.toLowerCase() === want)
+        || voices.find((v) => v.name.toLowerCase().includes(want))
+        || voices.find((v) => want.includes(v.name.toLowerCase()));
+      if (found) {
+        this.voice = found;
+        this.cfg.voice_hint = found.name;
+      }
+      return found || null;
     }
 
     listVoices() {

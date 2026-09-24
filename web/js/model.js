@@ -139,7 +139,12 @@
     }
 
     _build() {
-      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      // preserveDrawingBuffer so the canvas can still be read after the frame
+      // is drawn. Without it toDataURL comes back blank except in the instant
+      // between render and composite, and J.A.R.V.I.S. cannot look at what he
+      // just built. It costs a little fill rate and nothing else.
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true,
+                                                 preserveDrawingBuffer: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       this.el.appendChild(renderer.domElement);
       this.renderer = renderer;
@@ -598,6 +603,49 @@
       this.camera.position.set(this.pan.x, this.pan.y, this.distance);
       this.camera.lookAt(this.pan.x, this.pan.y, 0);
       this.renderer.render(this.scene, this.camera);
+    }
+
+    /* Photograph the model from a few angles so J.A.R.V.I.S. can look at what
+       he just built. Editing geometry blind is what turned a nozzle into a
+       starburst: the numbers all checked out and nobody looked.
+
+       The viewer's own camera is left exactly as the user had it — the shot
+       is taken from a temporary one, so capturing never moves the model on
+       screen. Angles rather than one view because a change can be invisible
+       from the front and obvious from the side. */
+    capture(views = 3, size = 640) {
+      if (!this.ready || !this.renderer || !this.group) return [];
+      const canvas = this.renderer.domElement;
+      const oldW = canvas.width, oldH = canvas.height;
+      const keep = { x: this.group.rotation.x, y: this.group.rotation.y, z: this.group.rotation.z };
+      const cam = this.camera.position.clone();
+      const shots = [];
+      try {
+        this.renderer.setSize(size, size, false);
+        this.camera.aspect = 1;
+        // Back off a little so a part that grew cannot leave the frame — a
+        // shot that crops the failure is worse than no shot.
+        const dist = this.distance * 1.35;
+        for (let i = 0; i < views; i++) {
+          const yaw = (i / views) * Math.PI * 2;
+          this.group.rotation.set(0.34, yaw, 0);
+          this.camera.position.set(0, 0, dist);
+          this.camera.lookAt(0, 0, 0);
+          this.camera.updateProjectionMatrix();
+          this.renderer.render(this.scene, this.camera);
+          shots.push(canvas.toDataURL('image/png'));
+        }
+      } catch (_) {
+        return [];
+      } finally {
+        this.group.rotation.set(keep.x, keep.y, keep.z);
+        this.camera.position.copy(cam);
+        this.renderer.setSize(oldW, oldH, false);
+        this.camera.aspect = oldW / Math.max(oldH, 1);
+        this.camera.updateProjectionMatrix();
+        this._resize();
+      }
+      return shots;
     }
   }
 

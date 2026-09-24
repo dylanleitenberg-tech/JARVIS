@@ -237,6 +237,34 @@ def _open_named_source(m) -> Optional[Intent]:
     return ("__open_source", {"query": m.group(1).strip(), "app": "openscad"}, "")
 
 
+@rule(r"^(?:try|test|audition|cycle|change|pick|choose)\s+(?:the\s+|your\s+|a\s+|some\s+)?"
+      r"voices?(?:\s+.*)?$|^(?:let me hear|what voices)(?:\s+.*)?$|^voice test$")
+def _voice_audition(m) -> Optional[Intent]:
+    """Voices cannot be chosen from a list — the names say nothing about how
+    they sound. Play them instead."""
+    return ("__voice_audition", {}, "")
+
+
+@rule(r"^(?:use|keep|set|switch to|i want|stick with|go with)\s+(?:the\s+)?"
+      r"(.+?)(?:\s+voice)?[.!]?$")
+def _voice_use(m) -> Optional[Intent]:
+    target = m.group(1).strip()
+    # Only claim this when it is clearly about the voice, or "use the model"
+    # and "switch to Safari" end up here.
+    if not re.search(r"\bvoice\b", m.string, re.I):
+        return None
+    name = re.sub(r"\bvoice\b", "", target, flags=re.I).strip()
+    return ("__voice_use", {"name": name}, "")
+
+
+@rule(r"^(?:keep|use|stick with|i like|that one|this one)"
+      r"(?:\s+(?:this|that|it|the last)(?:\s+one)?)?[.!]?$")
+def _voice_keep(m) -> Optional[Intent]:
+    """"Keep that one", said while listening to it. Nobody chooses a voice by
+    remembering its name; they choose the one that just played."""
+    return ("__voice_use", {"name": "this"}, "")
+
+
 @rule(r"^(?:models|model list|show models|what models(?: do i have)?)[.!?]?$")
 def _model_list(m) -> Optional[Intent]:
     return ("__model", {"query": ""}, "")

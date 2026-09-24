@@ -354,7 +354,15 @@ def run_script(parts, script: str, log):
     for name in ("select", "names", "bbox", "move", "rotate", "scale", "stretch", "delete",
                  "add", "copy", "mirror", "fillet", "cut", "union", "revolve", "bell"):
         env[name] = getattr(ed, name)
+    # The whole assembly before the script runs. Without this the only sanity
+    # check was "is the added part bigger than the removed one", which no
+    # stretch, scale or move ever triggers — they add and remove nothing. Two
+    # successive 30% stretches over overlapping selections therefore passed
+    # unchecked and came out as a starburst.
+    before_box = _assembly_box(parts)
+
     exec(compile(script, "<edit>", "exec"), env)
+
     # Sizes for the host's sanity check: what was removed, what was added.
     added = [n for verb, names in ed.touched if verb == "added" for n in names]
     add_box = None
@@ -362,8 +370,23 @@ def run_script(parts, script: str, log):
         if p["name"] in added:
             b = p["shape"].BoundingBox()
             add_box = _grow(add_box, (b.xmin, b.ymin, b.zmin, b.xmax, b.ymax, b.zmax))
-    ed.touched.append(["_boxes", {"removed": getattr(ed, "removed_box", None), "added": add_box}])
+    ed.touched.append(["_boxes", {"removed": getattr(ed, "removed_box", None),
+                                  "added": add_box,
+                                  "before": before_box,
+                                  "after": _assembly_box(parts)}])
     return ed.touched
+
+
+def _assembly_box(parts):
+    """Bounding box of everything, or None if there is nothing to measure."""
+    box = None
+    for p in parts:
+        try:
+            b = p["shape"].BoundingBox()
+        except Exception:
+            continue
+        box = _grow(box, (b.xmin, b.ymin, b.zmin, b.xmax, b.ymax, b.zmax))
+    return box
 
 
 def export(parts, stl: str, step, tolerance: float, angular: float) -> None:
