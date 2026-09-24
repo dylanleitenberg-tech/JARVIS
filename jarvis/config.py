@@ -14,12 +14,12 @@ DEFAULTS = {
         "host": "127.0.0.1",
         "port": 8420,
         "open_browser": True,
-        "kiosk": True,
+        "kiosk": False,
         # The HUD is meant to stay up. Closing the window asks first, and if it
         # goes away anyway it is reopened — unless you powered down deliberately.
-        "persist_hud": True,
+        "persist_hud": False,
         "relaunch_after": 8.0,     # grace period, so a reload is not a close
-        "max_relaunches": 6,       # then stop, rather than fight the user
+        "max_relaunches": 0,       # then stop, rather than fight the user
     },
     "speech": {
         # STT and TTS both run in the browser (Web Speech API). The page owns the
@@ -124,10 +124,14 @@ DEFAULTS = {
         },
     },
     "models": {
-        # Roots searched for STL/OBJ models shown in the HUD's own 3D viewer.
-        # Everything served is resolved against this allow-list.
-        "roots": ["~/Asteroid_Miner", "~/Terrestrial_Replicator",
-                  "~/AR_Glasses_Rig", "~/FTC_BIOBUZZ"],
+        # Roots searched for STL/SCAD/STEP models shown in the HUD's own 3D
+        # viewer. Everything served is resolved against this allow-list.
+        # Empty means the usual places: Documents, Desktop and Downloads
+        # (platforms.default_model_roots). The setup panel adds folders here.
+        "roots": [],
+        # A Python that can import CadQuery, for STEP files. Empty means look
+        # for one (platforms.step_pythons).
+        "step_python": "",
         "max_files": 4000,
     },
     "cad": {
@@ -158,7 +162,7 @@ DEFAULTS = {
         "min_gain_scale": 0.20,
     },
     "ai": {
-        # backend: anthropic | ollama | claude-code | openai | command | offline
+        # backend: auto | anthropic | ollama | claude-code | openai | command | offline
         #
         #   anthropic    best answers, needs ANTHROPIC_API_KEY, costs money.
         #                Without the key it falls through to claude-code rather
@@ -168,7 +172,17 @@ DEFAULTS = {
         #                answer. Needs `ollama pull <local_model>` once.
         #   claude-code  borrows the Claude Code CLI login. No key either, but
         #                it is a subprocess per question — a few seconds.
-        "backend": "anthropic",
+        #   auto         anthropic when ANTHROPIC_API_KEY is set, else ollama
+        #                when it is installed, else offline. The default.
+        "backend": "auto",
+        # Claude Code, if you have installed and signed in to it yourself, can
+        # answer what the fixed phrases miss and write geometry edits. Off by
+        # default: it runs on its owner's own Claude login, which is theirs to
+        # switch on here, not something this program hands out.
+        #   smart_backend  "claude-code" routes understanding through it
+        #   claude_code    true lets geometry edits use it
+        "smart_backend": "off",
+        "claude_code": False,
         "model": "claude-sonnet-5",
         # Used instead of `model` when the backend is ollama, so switching
         # backends does not mean editing the model name too.
@@ -215,7 +229,7 @@ DEFAULTS = {
         "history_turns": 12,
         "allow_tools": True,
         "system": (
-            "You are J.A.R.V.I.S., Tony Stark's assistant, now running on the user's Mac. "
+            "You are J.A.R.V.I.S., Tony Stark's assistant, now running on the user's computer. "
             "You are dry, unflappable, and economical. Address the user as 'Sir' occasionally, "
             "not every sentence. Your replies are SPOKEN ALOUD, so: one or two sentences, no "
             "markdown, no lists, no emoji, no stage directions. When the user asks you to do "
@@ -272,6 +286,12 @@ def load(path: pathlib.Path | None = None) -> dict:
         except json.JSONDecodeError as exc:
             raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
     cfg = _deep_merge(DEFAULTS, user)
+    if not cfg["models"]["roots"]:
+        from . import platforms
+        cfg["models"]["roots"] = platforms.default_model_roots()
+    if cfg["models"].get("step_python"):
+        os.environ.setdefault("JARVIS_STEP_PYTHON",
+                              os.path.expanduser(cfg["models"]["step_python"]))
 
     # Environment escape hatches, handy for one-off runs.
     if os.environ.get("JARVIS_PORT"):

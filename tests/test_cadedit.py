@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from jarvis import cadedit
 from jarvis.ai import intents
-from jarvis.models import OPENSCAD
+from jarvis.models import OPENSCAD, have_openscad
 
 FAILURES = []
 
@@ -71,7 +71,7 @@ check("a drag is one undo step", s.undo() and abs(s.current("width") - 44.2) < 1
 s.set("wall_t", 2.5)
 check("back to base drops the override", "wall_t" not in s.overrides)
 
-if pathlib.Path(OPENSCAD).exists():
+if have_openscad():
     t = time.time()
     out = s.compile()
     check("compiles with overrides", out is not None and out.stat().st_size > 84, s.last_error)
@@ -96,7 +96,7 @@ src_before = f.read_text()
 s2 = cadedit.EditSession(f, OPENSCAD)
 s2.set_source(s2.source().replace("part();", "part();\ntranslate([0, 0, 20]) cube(5);"))
 check("source edit held in memory", s2.dirty and f.read_text() == src_before)
-if pathlib.Path(OPENSCAD).exists():
+if have_openscad():
     built = s2.compile()
     check("edited source compiles", built is not None, s2.last_error)
     check("no scratch file left", not list(tmp.glob(".jarvis-edit-*")))

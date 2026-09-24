@@ -16,14 +16,20 @@ prompts are denied outright.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+sys.path.insert(0, str(ROOT))
+from jarvis import platforms  # noqa: E402
+
+CHROME = platforms.browser()[0] or ""
 
 # (seconds, kind, text): kind is interim, final, or say (J.A.R.V.I.S. speaks;
 # the fake synthesiser takes 3 s).
@@ -116,26 +122,38 @@ document.getElementById('out').textContent = JSON.stringify(results);
 
 
 def run() -> dict:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = pathlib.Path(tmp)
-        data = {name: steps for name, (steps, _) in SCENARIOS.items()}
-        page = tmp / "wake.html"
-        page.write_text(PAGE.replace("SPEECH", (ROOT / "web/js/speech.js").as_uri())
-                            .replace("DATA", json.dumps(data)))
-        out = tmp / "dom.html"
-        with open(out, "w") as sink:
-            # --dump-dom prints once the page has loaded, but Chrome does not
-            # always exit afterwards; wait for the output, then end it.
-            proc = subprocess.Popen(
-                [CHROME, "--headless=new", f"--user-data-dir={tmp / 'profile'}",
-                 "--deny-permission-prompts", "--allow-file-access-from-files",
-                 "--no-first-run", "--dump-dom", page.as_uri()],
-                stdout=sink, stderr=subprocess.DEVNULL)
-            deadline = time.time() + 60
-            while time.time() < deadline and "</pre>" not in out.read_text():
-                time.sleep(0.2)
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="jarvis-wake-"))
+    try:
+        return _run(tmp)
+    finally:
+        # Chrome's helpers can still be writing into the profile for a moment
+        # after the browser is gone; a leftover temp folder is not a failure.
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run(tmp: pathlib.Path) -> dict:
+    data = {name: steps for name, (steps, _) in SCENARIOS.items()}
+    page = tmp / "wake.html"
+    page.write_text(PAGE.replace("SPEECH", (ROOT / "web/js/speech.js").as_uri())
+                        .replace("DATA", json.dumps(data)))
+    out = tmp / "dom.html"
+    with open(out, "w") as sink:
+        # --dump-dom prints once the page has loaded, but Chrome does not
+        # always exit afterwards; wait for the output, then end it.
+        proc = subprocess.Popen(
+            [CHROME, "--headless=new", f"--user-data-dir={tmp / 'profile'}",
+             "--deny-permission-prompts", "--allow-file-access-from-files",
+             "--no-first-run", "--dump-dom", page.as_uri()],
+            stdout=sink, stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.time() + 60
+        while time.time() < deadline and "</pre>" not in out.read_text():
+            time.sleep(0.2)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)     # the browser and its helpers
+        except (OSError, AttributeError):           # AttributeError: Windows
             proc.kill()
-        text = out.read_text()
+        proc.wait(timeout=10)
+    text = out.read_text()
     start = text.index('<pre id="out">') + len('<pre id="out">')
     raw = text[start:text.index("</pre>")]
     raw = raw.replace("&quot;", '"').replace("&amp;", "&").replace("&#39;", "'")
@@ -143,8 +161,8 @@ def run() -> dict:
 
 
 def main() -> int:
-    if not pathlib.Path(CHROME).exists():
-        print("  SKIP  no Google Chrome")
+    if not CHROME:
+        print("  SKIP  no Chromium-family browser")
         return 0
     got = run()
     failures = []

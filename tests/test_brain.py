@@ -88,8 +88,10 @@ check("claude-code resolves at startup, not at first use",
 print(f"        claude-code reports: {cc['status']} — {cc['detail']}")
 
 nokey = brain_for("anthropic", api_key_env="JARVIS_DEFINITELY_UNSET").info()
+# To a local model when one is installed (the "openai" client talks to
+# ollama), else a Claude Code login its owner switched on, else offline.
 check("no key falls through rather than going silently mute",
-      nokey["backend"] in ("command", "offline"), True)
+      nokey["backend"] in ("openai", "command", "offline"), True)
 print(f"        anthropic without a key: {nokey['backend']} — {nokey['detail']}")
 
 

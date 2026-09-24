@@ -872,3 +872,70 @@ button.ghost.power:hover {
 .model-params footer { margin-top: auto; padding: 7px 12px; border-top: 1px solid var(--hud-faint); font-size: 9px; color: var(--hud-dim); letter-spacing: .06em; }
 
 .model-params .param.edit label span { white-space: normal; overflow: visible; }
+
+/* ---------------------------------------------------------------- setup
+   The permissions panel: one row per thing the machine must allow, its state
+   here, and the button that asks for it. Same frame as the confirm dialog. */
+
+button.ghost.setup-btn {
+  padding: 5px 10px; font-size: 10px; letter-spacing: .22em;
+  color: var(--hud-dim); border-color: var(--hud-faint);
+}
+.setup {
+  position: fixed; inset: 0; z-index: 8;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(1, 6, 11, 0.78);
+  backdrop-filter: blur(3px);
+  animation: fade-in .2s ease;
+}
+.setup[hidden] { display: none; }
+.setup-box {
+  width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto;
+  padding: 24px 28px 18px;
+  background: linear-gradient(180deg, rgba(12, 44, 64, .9), rgba(3, 16, 26, .9));
+  border: 1px solid var(--hud);
+  box-shadow: 0 0 60px rgba(100, 227, 255, .16), inset 0 0 40px rgba(100, 227, 255, .05);
+  clip-path: polygon(16px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 16px);
+}
+.setup-box h3 {
+  font-family: var(--font-head); font-size: 12px; letter-spacing: .34em;
+  color: var(--hud); margin-bottom: 6px;
+}
+.setup-sub { color: var(--hud-mid); font-size: 14px; margin-bottom: 14px; }
+.setup-list { list-style: none; margin: 0; padding: 0; }
+.setup-row {
+  display: grid; grid-template-columns: 92px 1fr auto; gap: 14px; align-items: center;
+  padding: 10px 0; border-top: 1px solid var(--hud-faint);
+}
+.setup-state {
+  font-family: var(--font-head); font-size: 9px; letter-spacing: .2em; text-align: center;
+  padding: 4px 0; border: 1px solid currentColor; color: var(--hud-dim);
+}
+.setup-row.ok .setup-state      { color: var(--green); }
+.setup-row.needed .setup-state  { color: var(--red); }
+.setup-row.limited .setup-state { color: var(--amber); }
+.setup-row.waiting .setup-state { color: var(--hud); animation: mic-breathe 2.4s ease-in-out infinite; }
+.setup-text b {
+  display: block; font-family: var(--font-head); font-size: 11px; font-weight: 700;
+  letter-spacing: .18em; color: var(--hud-bright);
+}
+.setup-text small { display: block; font-size: 12.5px; color: var(--hud-dim); margin-top: 2px; }
+.setup-text em {
+  display: block; margin-top: 3px; font-style: normal;
+  font-family: var(--font-mono); font-size: 11px; color: var(--hud-mid);
+}
+.setup-row.needed .setup-text em { color: var(--hud-bright); }
+.setup-folder { display: flex; gap: 6px; }
+.setup-folder input {
+  width: 190px; padding: 5px 8px; font-family: var(--font-mono); font-size: 11px;
+  color: var(--hud-bright); background: rgba(1, 6, 11, .6);
+  border: 1px solid var(--hud-faint); outline: none;
+}
+.setup-folder input:focus { border-color: var(--hud); }
+.setup-note { min-height: 16px; margin: 10px 0 4px; font-family: var(--font-mono);
+              font-size: 11px; color: var(--amber); }
+.setup-actions { display: flex; justify-content: flex-end; }
+@media (max-width: 560px) {
+  .setup-row { grid-template-columns: 1fr; }
+  .setup-folder input { width: 100%; }
+}

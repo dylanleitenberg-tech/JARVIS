@@ -12,7 +12,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from . import macos
+from . import desktop
 
 Schema = Dict[str, Any]
 
@@ -63,46 +63,46 @@ def _int(desc: str, required: bool = True, **extra: Any) -> Schema:
 
 # ------------------------------------------------------------------ app control
 
-action("open_app", "Launch or focus a Mac application by name, e.g. 'Safari', 'Spotify', 'Visual Studio Code'.",
+action("open_app", "Launch or focus an application by name, e.g. 'Spotify', 'Chrome', 'Visual Studio Code'.",
        _obj(name=_str("Application name as a person would say it")),
-       category="apps")(macos.open_app)
+       category="apps")(desktop.open_app)
 
 action("quit_app", "Quit a running application entirely.",
-       _obj(name=_str("Application name")), confirm=True, category="apps")(macos.quit_app)
+       _obj(name=_str("Application name")), confirm=True, category="apps")(desktop.quit_app)
 
 action("focus_app", "Bring an already-running application to the front.",
-       _obj(name=_str("Application name")), category="apps")(macos.activate_app)
+       _obj(name=_str("Application name")), category="apps")(desktop.activate_app)
 
 action("hide_app", "Hide an application's windows without quitting it.",
        _obj(name=_str("Application name; omit for the front app", required=False)),
-       category="apps")(macos.hide_app)
+       category="apps")(desktop.hide_app)
 
 action("list_apps", "List the applications currently running.",
-       category="apps", speak_result=True)(macos.list_apps)
+       category="apps", speak_result=True)(desktop.list_apps)
 
 
 # ------------------------------------------------------------------- windows
 
-action("close_window", "Close the frontmost window.", category="windows")(macos.close_window)
-action("minimize_window", "Minimise the frontmost window.", category="windows")(macos.minimize_window)
-action("fullscreen_window", "Toggle fullscreen on the front window.", category="windows")(macos.fullscreen_window)
+action("close_window", "Close the frontmost window.", category="windows")(desktop.close_window)
+action("minimize_window", "Minimise the frontmost window.", category="windows")(desktop.minimize_window)
+action("fullscreen_window", "Toggle fullscreen on the front window.", category="windows")(desktop.fullscreen_window)
 
 action("snap_window", "Move the front window to a screen position.",
        _obj(where=_str("One of: left, right, top, bottom, full, center",
                        enum=["left", "right", "top", "bottom", "full", "center"]),
             app=_str("Application to affect; omit for the front app", required=False)),
-       category="windows")(macos.snap_window)
+       category="windows")(desktop.snap_window)
 
 action("list_windows", "List every open window with its app, title and geometry.",
-       category="windows")(macos.list_windows)
+       category="windows")(desktop.list_windows)
 
-action("mission_control", "Show Mission Control (all windows and spaces).",
-       category="windows")(macos.mission_control)
-action("show_desktop", "Reveal the desktop.", category="windows")(macos.show_desktop)
-action("app_switcher", "Show the application switcher.", category="windows")(macos.app_switcher)
+action("mission_control", "Show every open window at once (Mission Control on a Mac, Task View on Windows).",
+       category="windows")(desktop.mission_control)
+action("show_desktop", "Reveal the desktop.", category="windows")(desktop.show_desktop)
+action("app_switcher", "Show the application switcher.", category="windows")(desktop.app_switcher)
 
 action("switch_space", "Switch to a numbered desktop/space.",
-       _obj(index=_int("Space number, 1-9")), category="windows")(macos.switch_space)
+       _obj(index=_int("Space number, 1-9")), category="windows")(desktop.switch_space)
 
 
 # ------------------------------------------------------------------- browser
@@ -110,95 +110,95 @@ action("switch_space", "Switch to a numbered desktop/space.",
 action("open_file", "Open a file on disk, optionally in a named application.",
        _obj(path=_str("Full path to the file"),
             app=_str("Application to open it with", required=False)),
-       category="apps")(macos.open_file)
+       category="apps")(desktop.open_file)
 
 action("open_url", "Open a web page in the browser.",
-       _obj(url=_str("Full URL or bare domain")), category="web")(macos.open_url)
+       _obj(url=_str("Full URL or bare domain")), category="web")(desktop.open_url)
 
 action("search_web", "Search the web and show the results.",
        _obj(query=_str("What to search for"),
             engine=_str("google, duckduckgo, youtube, wikipedia or maps", required=False,
                         enum=["google", "duckduckgo", "youtube", "wikipedia", "maps"])),
-       category="web")(macos.search_web)
+       category="web")(desktop.search_web)
 
 action("browser_tabs", "List the tabs open in the front browser window.",
-       category="web", speak_result=True)(macos.browser_tabs)
-action("new_tab", "Open a new browser tab.", category="web")(macos.browser_new_tab)
-action("close_tab", "Close the current browser tab.", category="web")(macos.browser_close_tab)
+       category="web", speak_result=True)(desktop.browser_tabs)
+action("new_tab", "Open a new browser tab.", category="web")(desktop.browser_new_tab)
+action("close_tab", "Close the current browser tab.", category="web")(desktop.browser_close_tab)
 action("select_tab", "Switch to a numbered browser tab.",
-       _obj(index=_int("Tab number, 1-9")), category="web")(macos.browser_select_tab)
+       _obj(index=_int("Tab number, 1-9")), category="web")(desktop.browser_select_tab)
 
 
 # -------------------------------------------------------------- input / media
 
 action("type_text", "Type text into the frontmost application.",
-       _obj(text=_str("Exact text to type")), category="input")(macos.type_text)
+       _obj(text=_str("Exact text to type")), category="input")(desktop.type_text)
 
-action("press_key", "Press a keyboard shortcut, e.g. 'cmd+s', 'cmd+shift+t', 'escape'.",
-       _obj(combo=_str("Key combination")), category="input")(macos.press_key)
+action("press_key", "Press a keyboard shortcut, e.g. 'cmd+s', 'cmd+shift+t', 'escape'. Write cmd for the main modifier; it is Ctrl off the Mac.",
+       _obj(combo=_str("Key combination")), category="input")(desktop.press_key)
 
 action("click", "Click the mouse at its current position.",
        _obj(button=_str("left or right", required=False, enum=["left", "right"]),
             clicks=_int("1 for a single click, 2 to double-click", required=False)),
-       category="input")(macos.click)
+       category="input")(desktop.click)
 
 action("right_click", "Right-click (open the context menu) where the cursor is.",
-       category="input")(lambda: macos.click(button="right"))
+       category="input")(lambda: desktop.click(button="right"))
 
 action("move_cursor", "Move the mouse cursor to a fraction of the screen (0-1 in each axis).",
        _obj(nx={"type": "number", "description": "Horizontal 0=left 1=right", "_required": True},
             ny={"type": "number", "description": "Vertical 0=top 1=bottom", "_required": True}),
-       category="input")(macos.move_mouse_norm)
+       category="input")(desktop.move_mouse_norm)
 
 action("scroll", "Scroll the view under the cursor.",
        _obj(dy=_int("Positive scrolls up, negative down", required=False),
-            dx=_int("Horizontal scroll", required=False)), category="input")(macos.scroll)
+            dx=_int("Horizontal scroll", required=False)), category="input")(desktop.scroll)
 
 action("set_volume", "Set the system output volume.",
-       _obj(level=_int("0 to 100")), category="media")(macos.set_volume)
+       _obj(level=_int("0 to 100")), category="media")(desktop.set_volume)
 action("volume_step", "Raise or lower the volume by a relative amount.",
        _obj(delta=_int("Positive to raise, negative to lower")),
-       category="media")(macos.volume_step)
+       category="media")(desktop.volume_step)
 action("mute", "Mute or unmute system audio.",
        _obj(muted={"type": "boolean", "description": "true to mute", "_required": False}),
-       category="media")(macos.set_mute)
+       category="media")(desktop.set_mute)
 action("play_pause", "Play or pause the current media.",
-       category="media")(lambda: macos.media_key("play_pause"))
-action("next_track", "Skip to the next track.", category="media")(lambda: macos.media_key("next_track"))
-action("prev_track", "Go back to the previous track.", category="media")(lambda: macos.media_key("prev_track"))
+       category="media")(lambda: desktop.media_key("play_pause"))
+action("next_track", "Skip to the next track.", category="media")(lambda: desktop.media_key("next_track"))
+action("prev_track", "Go back to the previous track.", category="media")(lambda: desktop.media_key("prev_track"))
 action("set_brightness", "Raise or lower display brightness.",
        _obj(direction=_str("up or down", enum=["up", "down"]),
-            steps=_int("How many notches", required=False)), category="media")(macos.set_brightness)
+            steps=_int("How many notches", required=False)), category="media")(desktop.set_brightness)
 
 
 # --------------------------------------------------------------------- system
 
 action("screenshot", "Capture the screen to the Desktop.",
        _obj(interactive={"type": "boolean", "description": "true to let the user drag a region",
-                         "_required": False}), category="system")(macos.screenshot)
+                         "_required": False}), category="system")(desktop.screenshot)
 
-action("lock_screen", "Lock the Mac.", confirm=True, category="system")(macos.lock_screen)
-action("sleep_display", "Put the display to sleep.", confirm=True, category="system")(macos.sleep_display)
+action("lock_screen", "Lock the computer.", confirm=True, category="system")(desktop.lock_screen)
+action("sleep_display", "Put the display to sleep.", confirm=True, category="system")(desktop.sleep_display)
 
 action("system_status", "Read CPU, memory, disk, battery and network telemetry.",
-       category="system", speak_result=True)(macos.system_status)
+       category="system", speak_result=True)(desktop.system_status)
 
-action("notify", "Post a macOS notification.",
+action("notify", "Post a desktop notification.",
        _obj(text=_str("Notification body"), title=_str("Title", required=False)),
-       category="system")(macos.notify)
+       category="system")(desktop.notify)
 
 action("clipboard_read", "Read the clipboard contents.",
-       category="system", speak_result=True)(macos.clipboard_get)
+       category="system", speak_result=True)(desktop.clipboard_get)
 action("clipboard_write", "Put text on the clipboard.",
-       _obj(text=_str("Text to copy")), category="system")(macos.clipboard_set)
+       _obj(text=_str("Text to copy")), category="system")(desktop.clipboard_set)
 
-action("run_shortcut", "Run a macOS Shortcut by name — use this for anything custom the user has built.",
+action("run_shortcut", "Run a macOS Shortcut by name — use this for anything custom the user has built (Mac only).",
        _obj(name=_str("Shortcut name"), text_input=_str("Optional input", required=False)),
-       category="system", speak_result=True)(macos.run_shortcut)
+       category="system", speak_result=True)(desktop.run_shortcut)
 
 action("run_shell", "Run a shell command. Disabled unless the user enabled it in config.",
        _obj(command=_str("Command line")), confirm=True, category="system",
-       speak_result=True)(macos.run_shell)
+       speak_result=True)(desktop.run_shell)
 
 
 # ------------------------------------------------------------------ dispatcher

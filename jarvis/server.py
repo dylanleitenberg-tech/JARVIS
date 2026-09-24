@@ -42,7 +42,8 @@ class Server:
                  hello: Optional[Callable[[], dict]] = None,
                  health: Optional[Callable[[], dict]] = None,
                  models=None,
-                 edit_output: Optional[Callable[[str], Optional[object]]] = None):
+                 edit_output: Optional[Callable[[str], Optional[object]]] = None,
+                 permissions=None):
         self.cfg = config["server"]
         self.config = config
         self.bus = bus
@@ -52,6 +53,7 @@ class Server:
         self.health = health
         self.models = models
         self.edit_output = edit_output
+        self.permissions = permissions
         self.clients: Set[web.WebSocketResponse] = set()
         self.app = web.Application(client_max_size=4 * 1024 * 1024,
                                    middlewares=[no_store])
@@ -68,6 +70,8 @@ class Server:
         self.app.router.add_get("/api/models", self.api_models)
         self.app.router.add_get("/api/model", self.api_model)
         self.app.router.add_get("/api/model_edit", self.api_model_edit)
+        self.app.router.add_get("/api/permissions", self.api_permissions)
+        self.app.router.add_post("/api/permissions", self.api_permissions_request)
         self.app.router.add_static("/", WEB_ROOT, show_index=False, follow_symlinks=False)
 
     # ------------------------------------------------------------ handlers
@@ -75,6 +79,43 @@ class Server:
     async def index(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(WEB_ROOT / "index.html",
                                 headers={"Cache-Control": "no-store"})
+
+    def _same_origin(self, request: web.Request) -> bool:
+        """Only this interface may drive the machine.
+
+        A browser lets any web page open a websocket to 127.0.0.1, so without
+        this a site in another tab could connect and send "utterances" that
+        type, click and open things. Browsers always send Origin on those
+        requests and pages cannot forge it; a missing one is a local tool
+        (a test, curl), not a page.
+        """
+        origin = request.headers.get("Origin")
+        if not origin:
+            return True
+        port = self.cfg["port"]
+        return origin in (f"http://{request.host}", f"http://127.0.0.1:{port}",
+                          f"http://localhost:{port}")
+
+    async def api_permissions(self, request: web.Request) -> web.Response:
+        if self.permissions is None:
+            raise web.HTTPNotFound()
+        return web.json_response(await asyncio.to_thread(self.permissions.summary))
+
+    async def api_permissions_request(self, request: web.Request) -> web.Response:
+        if self.permissions is None:
+            raise web.HTTPNotFound()
+        if not self._same_origin(request):
+            raise web.HTTPForbidden(text="cross-origin request refused")
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            raise web.HTTPBadRequest(text="expected JSON")
+        if body.get("seen"):
+            self.permissions.seen()
+            return web.json_response({"said": "ok"})
+        said = await asyncio.to_thread(self.permissions.request, str(body.get("id", "")),
+                                       str(body.get("arg", "")))
+        return web.json_response({"said": said})
 
     async def api_health(self, request: web.Request) -> web.Response:
         if self.health is None:
@@ -122,6 +163,8 @@ class Server:
         return web.json_response(payload)
 
     async def websocket(self, request: web.Request) -> web.WebSocketResponse:
+        if not self._same_origin(request):
+            raise web.HTTPForbidden(text="cross-origin websocket refused")
         ws = web.WebSocketResponse(heartbeat=20.0, max_msg_size=4 * 1024 * 1024)
         await ws.prepare(request)
         self.clients.add(ws)

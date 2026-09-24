@@ -265,11 +265,11 @@ class GestureEngine:
             # is a drag. Nothing fires on a single stray frame of pinch.
             if pose == "pinch" and not self.dragging \
                     and state.stable_count >= STABLE_FRAMES:
-                from ..control import macos
+                from ..control import desktop
                 self.dragging = True
                 self.drag_started = now
                 self.drag_origin = self.cursor
-                macos.mouse_down()
+                desktop.mouse_down()
                 await self.bus.publish("gesture", name="press", hand=label)
             elif pose == "point" and self.dragging:
                 await self._release_drag(now)
@@ -335,8 +335,8 @@ class GestureEngine:
         dy = (last - y) * gain
         if abs(dy) < 1.0:
             return
-        from ..control import macos
-        macos.scroll(int(max(-120, min(120, dy))))
+        from ..control import desktop
+        desktop.scroll(int(max(-120, min(120, dy))))
         if now - getattr(self, "_scroll_logged", 0.0) > 0.5:
             self._scroll_logged = now
             await self.bus.publish("gesture", name="scroll", hand=hand["label"],
@@ -353,12 +353,12 @@ class GestureEngine:
         else:
             self.cursor = (self.cursor[0] + alpha * (nx - self.cursor[0]),
                            self.cursor[1] + alpha * (ny - self.cursor[1]))
-        from ..control import macos
+        from ..control import desktop
         if self.dragging:
-            w, h = macos.screen_size()
-            macos.drag_to(self.cursor[0] * w, self.cursor[1] * h)
+            w, h = desktop.screen_size()
+            desktop.drag_to(self.cursor[0] * w, self.cursor[1] * h)
         else:
-            macos.move_mouse_norm(*self.cursor)
+            desktop.move_mouse_norm(*self.cursor)
         await self.bus.publish("cursor", x=round(self.cursor[0], 4), y=round(self.cursor[1], 4),
                                dragging=self.dragging)
 
@@ -367,8 +367,8 @@ class GestureEngine:
             return
         now = now or time.time()
         self.dragging = False
-        from ..control import macos
-        macos.mouse_up()
+        from ..control import desktop
+        desktop.mouse_up()
         held = now - getattr(self, "drag_started", now)
         origin = getattr(self, "drag_origin", None) or self.cursor or (0.0, 0.0)
         travel = math.hypot((self.cursor or origin)[0] - origin[0],

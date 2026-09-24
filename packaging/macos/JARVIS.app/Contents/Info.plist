@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>                <string>JARVIS</string>
+  <key>CFBundleDisplayName</key>         <string>J.A.R.V.I.S.</string>
+  <key>CFBundleIdentifier</key>          <string>com.leitenberg.jarvis</string>
+  <key>CFBundleVersion</key>             <string>1.0</string>
+  <key>CFBundleShortVersionString</key>  <string>1.0</string>
+  <key>CFBundlePackageType</key>         <string>APPL</string>
+  <key>CFBundleExecutable</key>          <string>jarvis</string>
+  <key>CFBundleIconFile</key>            <string>JARVIS</string>
+  <key>LSMinimumSystemVersion</key>      <string>12.0</string>
+  <key>NSCameraUsageDescription</key>
+  <string>J.A.R.V.I.S. tracks your hands to control the computer.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>J.A.R.V.I.S. listens for spoken commands.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>J.A.R.V.I.S. opens and arranges applications for you.</string>
+</dict>
+</plist>

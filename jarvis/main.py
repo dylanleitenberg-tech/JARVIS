@@ -32,7 +32,7 @@ from . import config as config_module
 from .ai.brain import Brain
 from .ai import intents
 from .bus import Bus
-from .control import macos
+from .control import desktop
 from .control.actions import Dispatcher
 from .server import Server
 
@@ -82,6 +82,10 @@ class Jarvis:
         self.knowledge = Knowledge(cfg.get("models", {}).get("roots", []))
         from .watch import Watcher
         self.watcher = Watcher(cfg)
+        from .permissions import Permissions
+        self.permissions = Permissions(self)
+        self._first_load_started = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         # A thing that has never worked has not been lost; these keep startup
         # from being announced as a series of failures.
         self._had_vision = False
@@ -107,6 +111,11 @@ class Jarvis:
     # --------------------------------------------------------------- setup
 
     def hello(self) -> Dict[str, Any]:
+        # The interface has opened: raise the operating system's own permission
+        # prompts now, once, in a thread (each one waits on a person).
+        if not self._first_load_started:
+            self._first_load_started = True
+            asyncio.get_running_loop().run_in_executor(None, self.permissions.first_load)
         return {
             "config": {"speech": self.cfg["speech"], "hud": self.cfg["hud"],
                        "vision": {"enabled": self.cfg["vision"]["enabled"],
@@ -119,12 +128,13 @@ class Jarvis:
                          "tuning": {k: self.cfg["gestures"].get(k) for k in self.TUNABLE},
                          "limits": {k: list(v) for k, v in self.TUNABLE.items()}},
             "cad": self.gestures.cad.status() if self.gestures else {"active": False},
-            "accessibility": macos.accessibility_trusted(),
+            "accessibility": desktop.accessibility_trusted(),
             "uptime": round(time.time() - self.started, 1),
         }
 
     async def run(self, args) -> None:
         loop = asyncio.get_running_loop()
+        self._loop = loop
         self.bus.bind_loop(loop)
 
         if self.cfg["gestures"]["enabled"] and self.cfg["vision"]["enabled"]:
@@ -139,7 +149,8 @@ class Jarvis:
         self.server = Server(self.cfg, self.bus, self.on_hud_message,
                              get_jpeg=lambda: self.vision.latest_jpeg() if self.vision else None,
                              hello=self.hello, health=self.health,
-                             models=self.models, edit_output=self._edit_output)
+                             models=self.models, edit_output=self._edit_output,
+                             permissions=self.permissions)
         try:
             url = await self.server.start()
         except OSError as exc:
@@ -158,9 +169,8 @@ class Jarvis:
             holder = _port_holder(port)
             print(f"\n  Port {port} is already in use{holder}.")
             print("  J.A.R.V.I.S. is most likely already running.\n")
-            print(f"    open the HUD   open -a 'Google Chrome' {url}")
-            print( "    stop the old   pkill -f jarvis.main")
-            print( "    or start here  ./jarvis-run --replace\n")
+            print(f"    open the HUD   {url}")
+            print( "    or start here  jarvis --replace\n")
             return
         self._hud_url = url
         # A local model that is not running is the usual reason anything but a
@@ -178,14 +188,16 @@ class Jarvis:
         print(f"  model        {self.brain.info()['backend']} / {self.brain.info()['detail']}")
         print(f"  vision       {'on' if self.cfg['vision']['enabled'] else 'off'}"
               f"   gestures {'on' if self.cfg['gestures']['enabled'] else 'off'}")
-        trusted = macos.accessibility_trusted()
+        trusted = desktop.accessibility_trusted()
         note = ("granted" if trusted else
                 "NOT GRANTED — keyboard, mouse and window control will do nothing")
         print(f"  accessibility {note}")
         print("\n  Speech runs in the browser tab; leave it focused and allow the microphone.")
         print("  Ctrl-C to shut down.\n")
 
-        if self.cfg["vision"]["enabled"] and not args.no_vision:
+        if args.no_vision:
+            self.cfg["vision"]["enabled"] = False      # so the setup panel says off, not starting
+        if self.cfg["vision"]["enabled"]:
             self.start_vision()
 
         if self.cfg["server"]["open_browser"] and not args.no_browser:
@@ -313,11 +325,19 @@ class Jarvis:
             print(f"  (could not pre-grant the microphone: {exc})")
 
     def open_hud(self, url: str) -> None:
-        """Prefer a dedicated Chrome window in app mode: no tabs, no chrome, no URL bar."""
-        chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        import pathlib
+        """Prefer a dedicated browser window in app mode: no tabs, no URL bar.
+
+        Chrome, then Edge — the two whose pages can recognise speech — then
+        any other Chromium browser for a voiceless interface, then whatever
+        the system opens links in.
+        """
+        from . import platforms
+        chrome, name, speech = platforms.browser()
         profile = config_module.ROOT / ".chrome-profile"
-        if pathlib.Path(chrome).exists():
+        if not speech:
+            print("  no Google Chrome or Microsoft Edge: the interface will work, "
+                  "but not by voice")
+        if chrome:
             self._seed_chrome_permissions(profile, url)
             flags = [chrome, f"--app={url}",
                      "--user-data-dir=" + str(profile),
@@ -409,6 +429,11 @@ class Jarvis:
             await self.bus.publish("log", level="warn", text="HUD closed — reopening")
             self.open_hud(self._hud_url)
 
+    def schedule_power_down(self) -> None:
+        """power_down, from a thread (the setup panel's restart runs in one)."""
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.power_down()))
+
     async def power_down(self) -> None:
         """The deliberate way out: stop the watchdog, then stop the process."""
         self.quitting = True
@@ -448,7 +473,7 @@ class Jarvis:
         stat = dict(self.stat)
         seen = stat["last_hand_at"]
         heard = stat["last_voice_at"]
-        trusted = macos.accessibility_trusted()
+        trusted = desktop.accessibility_trusted()
 
         def ago(t):
             return None if t is None else round(now - t, 1)
@@ -458,25 +483,26 @@ class Jarvis:
             why = self.vision_error()
             problems.append(
                 f"camera is not running — {why}" if why else
-                "camera is not running: grant Camera to your terminal app in "
-                "System Settings > Privacy & Security > Camera, then restart it")
+                "camera is not running: allow the camera for JARVIS in your "
+                "system's privacy settings, then restart it")
         elif stat["hand_frames"] == 0:
             problems.append("camera is running but has never seen a hand — "
                             "hold one up, 40-70 cm from the lens")
         if stat["mic"] == "unknown":
             problems.append("the HUD has not reported a microphone — open the "
-                            "HUD page and click it once, then allow the mic in Chrome")
+                            "HUD and allow the microphone when it asks")
         elif stat["mic"] == "macos-denied":
-            problems.append("macOS is refusing Chrome the microphone. System "
-                            "Settings > Privacy & Security > Microphone > turn on "
-                            "Google Chrome, then fully quit and reopen Chrome")
+            problems.append("the system is refusing the browser the microphone. "
+                            "Turn it on in your privacy settings, then fully quit "
+                            "and reopen the browser")
         elif stat["mic"] != "live":
             problems.append(f"microphone is {stat['mic']}"
                             + (f" ({stat['mic_detail']})" if stat["mic_detail"] else ""))
         elif stat["voice_utterances"] == 0:
             problems.append("microphone is live but nothing has been transcribed — "
                             'say "Jarvis" and then a command')
-        if not (trusted or macos.relay_available()):
+        from .control import PLATFORM
+        if PLATFORM == "macos" and not (trusted or desktop.relay_available()):
             problems.append("Accessibility is not granted, so every gesture and "
                             "command that moves the mouse, presses a key or touches "
                             "a window will do nothing. Tick JARVIS under Privacy & "
@@ -513,8 +539,8 @@ class Jarvis:
             "control": {
                 # What matters is whether anything can actually move, which is
                 # true when this process is trusted OR the app relay is up.
-                "accessibility": trusted or macos.relay_available(),
-                "via": ("app relay" if macos.relay_available()
+                "accessibility": trusted or desktop.relay_available(),
+                "via": ("app relay" if desktop.relay_available()
                         else "direct" if trusted else "none"),
                 "actions_ok": stat["actions_ok"],
                 "actions_failed": stat["actions_failed"],
@@ -534,11 +560,14 @@ class Jarvis:
         running, so this both reports the flip when it happens and says plainly
         what to do when it does not.
         """
-        was = macos.accessibility_trusted()
+        from .control import PLATFORM
+        if PLATFORM != "macos":
+            return
+        was = desktop.accessibility_trusted()
         told = False
         while not self.quitting:
             await asyncio.sleep(4.0)
-            now = macos.accessibility_trusted()
+            now = desktop.accessibility_trusted()
             if now != was:
                 was = now
                 await self.bus.publish("accessibility", granted=now)
@@ -556,12 +585,12 @@ class Jarvis:
         loop = asyncio.get_running_loop()
         while True:
             try:
-                status = await loop.run_in_executor(None, macos.system_status)
+                status = await loop.run_in_executor(None, desktop.system_status)
                 status["vision_fps"] = self.vision.fps if self.vision else 0.0
                 status["vision_online"] = bool(self.vision and self.vision.running)
                 status["armed"] = bool(self.gestures and self.gestures.armed)
-                status["can_control"] = (macos.accessibility_trusted()
-                                         or macos.relay_available())
+                status["can_control"] = (desktop.accessibility_trusted()
+                                         or desktop.relay_available())
                 status["awake"] = self.awake
                 await self.bus.publish("telemetry", **status)
                 await self._maybe_speak_up(status)
@@ -740,7 +769,7 @@ class Jarvis:
         hour = time.localtime().tm_hour
         part = "morning" if hour < 12 else "afternoon" if hour < 18 else "evening"
         notes = []
-        if not macos.accessibility_trusted():
+        if not desktop.accessibility_trusted():
             notes.append("I have no control permissions yet")
         if self.brain.status != "ready":
             notes.append("and no model is connected")
@@ -1005,7 +1034,7 @@ class Jarvis:
         """The viewer loaded a model. A .scad one becomes editable."""
         import pathlib
         from .cadedit import EditSession
-        from .models import OPENSCAD
+        from .models import OPENSCAD, have_openscad
         path = self.models.resolve(raw_path) if raw_path else None
         self._shown = path
         # What is on screen decides which project's notes are worth offering,
@@ -1023,7 +1052,7 @@ class Jarvis:
             await self._start_step_edit(path)
             return
         self.step_edit = None
-        if path is None or path.suffix.lower() != ".scad" or not pathlib.Path(OPENSCAD).exists():
+        if path is None or path.suffix.lower() != ".scad" or not have_openscad():
             self.cad_edit = None
             await self.bus.publish("cad_params", path=None, params=[], dirty=False)
             return
@@ -1352,6 +1381,13 @@ class Jarvis:
     async def _claude_edit(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         import pathlib
         import sys as _sys
+        from . import platforms
+        if not self.cfg["ai"].get("claude_code"):
+            return {"say": "Geometry editing runs through Claude Code. Install it, sign in, "
+                           "and set ai.claude_code to true in jarvis.json.", "failed": True}
+        if not platforms.claude_cli():
+            return {"say": "Geometry editing needs the Claude Code command line, and it is "
+                           "not installed here.", "failed": True}
         bridge = pathlib.Path(__file__).resolve().parents[1] / "bridge" / "claude_edit.py"
 
         # ai.edit_model overrides the bridge's default, so the model doing the
@@ -1913,7 +1949,7 @@ def check_control() -> None:
     different question than the one that matters.
     """
     print("\n  control check\n")
-    trusted = macos.accessibility_trusted()
+    trusted = desktop.accessibility_trusted()
     import os
     bundled = "JARVIS.app" in os.path.abspath(sys.argv[0]) or \
               os.environ.get("JARVIS_BUNDLED") == "1"
@@ -1932,8 +1968,8 @@ def check_control() -> None:
             # the dialog and add it to the list itself, which is far more
             # reliable than asking someone to find the right file to drag.
             print("\n  Asking macOS for permission now — a dialog should appear.")
-            macos.request_accessibility()
-            macos.open_privacy_pane("Accessibility")
+            desktop.request_accessibility()
+            desktop.open_privacy_pane("Accessibility")
             print("  Allow it, or tick J.A.R.V.I.S. in the pane that just opened,")
             print("  then run ./check-control.sh again.\n")
         else:
@@ -1943,12 +1979,12 @@ def check_control() -> None:
 
     # The report can be optimistic; moving the cursor and reading it back is
     # the only proof that events reach the window server.
-    start = macos.mouse_position()
+    start = desktop.mouse_position()
     target = (start[0] + 60, start[1] + 40)
-    macos.move_mouse(*target)
+    desktop.move_mouse(*target)
     time.sleep(0.25)
-    landed = macos.mouse_position()
-    macos.move_mouse(*start)
+    landed = desktop.mouse_position()
+    desktop.move_mouse(*start)
     moved = abs(landed[0] - target[0]) < 4 and abs(landed[1] - target[1]) < 4
     print(f"  Cursor moved to {int(target[0])},{int(target[1])}, read back "
           f"{int(landed[0])},{int(landed[1])}")
@@ -1957,8 +1993,8 @@ def check_control() -> None:
         print("\n  The grant is stale. Remove the entry, add it again, restart.\n")
         raise SystemExit(1)
 
-    macos.mouse_down("middle", ["shift"])
-    macos.mouse_up("middle", ["shift"])
+    desktop.mouse_down("middle", ["shift"])
+    desktop.mouse_up("middle", ["shift"])
     print("  Middle-button + modifier drag: available (CAD orbit will work)")
     print("\n  Control is live. Gestures and CAD mode will move things.\n")
 
@@ -1982,7 +2018,7 @@ def check_permissions() -> None:
     else:
         print(f"  You launched this from:  {app}\n")
 
-    trusted = macos.accessibility_trusted()
+    trusted = desktop.accessibility_trusted()
     rows = [
         ("Accessibility", app, trusted,
          "move the mouse, press keys, manage windows"),
@@ -2001,15 +2037,31 @@ def check_permissions() -> None:
     print("  to a freshly launched process.\n")
 
     if not trusted:
-        macos.request_accessibility()
+        desktop.request_accessibility()
     for pane in ("Accessibility", "Camera", "Microphone"):
-        macos.open_privacy_pane(pane)
+        desktop.open_privacy_pane(pane)
         time.sleep(1.2)
 
     print("  The Microphone pane has NO + button: macOS lists an app only after")
     print("  that app has asked. To make Chrome ask, start J.A.R.V.I.S. and open")
     print(f"  http://127.0.0.1:{config_module.load()['server']['port']}/mic-test.html\n")
     print("  Check again with:  ./jarvis-run --permissions\n")
+
+
+def _stop_others() -> bool:
+    """Stop any other running J.A.R.V.I.S. — by its command line, on any OS."""
+    import psutil
+    me = os.getpid()
+    stopped = False
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        cmd = " ".join(proc.info.get("cmdline") or [])
+        if proc.info["pid"] != me and "jarvis.main" in cmd:
+            try:
+                proc.terminate()
+                stopped = True
+            except psutil.Error:
+                pass
+    return stopped
 
 
 def main() -> None:
@@ -2027,10 +2079,25 @@ def main() -> None:
                         help="prove this process can actually move the mouse")
     parser.add_argument("--permissions", action="store_true",
                         help="check and request the macOS permissions, then exit")
+    parser.add_argument("--log", action="store_true",
+                        help="write output to logs/run.log (for shortcuts with no terminal)")
     args = parser.parse_args()
+
+    # Started from a shortcut there is no terminal: pythonw on Windows has no
+    # stdout at all, and a desktop launcher's goes nowhere anyone looks.
+    if args.log or sys.stdout is None or sys.stderr is None:
+        log_dir = config_module.ROOT / "logs"
+        log_dir.mkdir(exist_ok=True)
+        stream = open(log_dir / "run.log", "a", buffering=1, encoding="utf-8")
+        sys.stdout = sys.stderr = stream
 
     if args.write_config:
         print(f"wrote {config_module.write_default()}")
+        return
+    from .control import PLATFORM
+    if (args.permissions or args.check_control) and PLATFORM != "macos":
+        print("  Nothing to check here from the command line: start JARVIS and the "
+              "setup panel lists every permission and asks for each one.")
         return
     if args.permissions:
         check_permissions()
@@ -2043,9 +2110,9 @@ def main() -> None:
     if args.port:
         cfg["server"]["port"] = args.port
     if args.replace:
-        subprocess.run(["pkill", "-f", "jarvis.main"], check=False)
-        time.sleep(2.0)
-        print("  stopped the previous instance")
+        if _stop_others():
+            time.sleep(2.0)
+            print("  stopped the previous instance")
     try:
         asyncio.run(Jarvis(cfg).run(args))
     except KeyboardInterrupt:

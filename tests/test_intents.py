@@ -21,7 +21,9 @@ FAILURES = []
 
 index = ModelIndex(config_module.load()["models"]["roots"])
 intents.model_lookup = index.best
-HAS_MODELS = bool(index.scan())
+# The routing cases below name real models from the author's projects; on any
+# other machine (a fresh install, CI) they do not exist and are skipped.
+HAS_MODELS = bool(index.scan()) and all(index.best(n) for n in ("astrowilly", "seed frame", "aft engine"))
 
 
 def says(utterance: str, action, note: str = "") -> None:
@@ -69,7 +71,7 @@ says("show me the desktop", "show_desktop")
 says("close the window", "close_window")
 
 if not HAS_MODELS:
-    print("\n  SKIP  model routing — no models indexed on this machine")
+    print("\n  SKIP  model routing — the models these cases name are not on this machine")
 else:
     print("\nnaming the format asks for the editor; the bare name asks for the mesh")
     # "open X cad" brings the hologram up in the HUD; only naming the editor

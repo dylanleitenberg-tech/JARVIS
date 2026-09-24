@@ -182,7 +182,7 @@ def prepare_viewport(app_name: str) -> List[str]:
     Every step needs Accessibility. Without it the list comes back empty and
     the caller says so rather than pretending the window is ready.
     """
-    from ..control import macos
+    from ..control import desktop
 
     _, profile = profile_for(app_name)
     if not profile.prepare:
@@ -193,16 +193,16 @@ def prepare_viewport(app_name: str) -> List[str]:
         # OpenSCAD stops answering AppleScript while it renders, and a click
         # sent during a preview comes back -1719 rather than queueing. Each
         # step therefore waits for the last one to finish thinking.
-        if not macos.wait_responsive(app_name, timeout=90.0):
+        if not desktop.wait_responsive(app_name, timeout=90.0):
             done.append(f"{item}: {app_name} stopped responding")
             break
         try:
             if want is None:
-                macos.click_menu(app_name, menu, item)
+                desktop.click_menu(app_name, menu, item)
                 done.append(item)
             else:
-                done.append(macos.set_menu_checked(app_name, menu, item, want))
-        except macos.ControlError as exc:
+                done.append(desktop.set_menu_checked(app_name, menu, item, want))
+        except desktop.ControlError as exc:
             done.append(f"{item}: {exc}")
     return done
 
@@ -212,7 +212,7 @@ def zoom_viewport(app_name: str, steps: int) -> int:
 
     Positive steps zoom in. Returns how many actually landed.
     """
-    from ..control import macos
+    from ..control import desktop
 
     _, profile = profile_for(app_name)
     if not profile.zoom_menu or not steps:
@@ -222,9 +222,9 @@ def zoom_viewport(app_name: str, steps: int) -> int:
     landed = 0
     for _ in range(min(abs(steps), 12)):
         try:
-            macos.click_menu(app_name, menu, item)
+            desktop.click_menu(app_name, menu, item)
             landed += 1
-        except macos.ControlError:
+        except desktop.ControlError:
             break
     return landed
 
@@ -278,11 +278,11 @@ class CadMode:
         the interface instead of the model. So a caller that opened the file
         says which application it opened, and only the spoken command guesses.
         """
-        from ..control import macos
+        from ..control import desktop
         try:
-            self.app = app or macos.frontmost_app()
+            self.app = app or desktop.frontmost_app()
             if app:
-                macos.activate_app(app)  # the drags have to land in its window
+                desktop.activate_app(app)  # the drags have to land in its window
         except Exception:
             self.app = app or ""
         self.profile_name, self.profile = profile_for(self.app)
@@ -360,7 +360,7 @@ class CadMode:
 
     async def _move(self, kind: str, hand: dict, now: Optional[float] = None) -> None:
         """Start or continue a drag, relative to where the cursor already is."""
-        from ..control import macos
+        from ..control import desktop
         button, mods = getattr(self.profile, kind)
         point = tuple(hand["palm"])
         now = now if now is not None else time.time()
@@ -368,11 +368,11 @@ class CadMode:
         if self._drag != kind:
             await self._release()
             self._drag = kind
-            self._anchor = macos.mouse_position()
+            self._anchor = desktop.mouse_position()
             self._pointer = self._new_pointer()
             self._pointer.delta(point, now)          # seed, no movement yet
             self._offset = [0.0, 0.0]
-            macos.mouse_down(button, mods)
+            desktop.mouse_down(button, mods)
             await self.bus.publish("cad_drag", kind=kind, button=button,
                                    modifiers=mods, app=self.app)
             return
@@ -388,18 +388,18 @@ class CadMode:
             return
         self._offset[0] += dx * gain
         self._offset[1] += dy * gain
-        macos.drag_to(self._anchor[0] + self._offset[0],
+        desktop.drag_to(self._anchor[0] + self._offset[0],
                       self._anchor[1] + self._offset[1], button, mods)
 
     async def _release(self) -> None:
         if self._drag is None:
             return
-        from ..control import macos
+        from ..control import desktop
         button, mods = getattr(self.profile, self._drag)
         kind, self._drag = self._drag, None
         self._anchor = self._pointer = None
         self._offset = [0.0, 0.0]
-        macos.mouse_up(button, mods)
+        desktop.mouse_up(button, mods)
         await self.bus.publish("cad_drag_end", kind=kind)
 
     async def _zoom_by_hand(self, hand: dict, now: float) -> None:
@@ -415,10 +415,10 @@ class CadMode:
         await self._zoom_delta(self._zoom_ref - y, now, ref=y)
 
     async def _scroll(self, amount: float) -> None:
-        from ..control import macos
+        from ..control import desktop
         if self.profile.invert_zoom:
             amount = -amount
-        macos.scroll(int(max(-60, min(60, amount))))
+        desktop.scroll(int(max(-60, min(60, amount))))
 
     async def fit(self) -> None:
         """Zoom to fit, where the application has a shortcut for it."""

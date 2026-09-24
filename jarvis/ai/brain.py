@@ -31,6 +31,8 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional
 
+from .. import platforms
+
 TOOL_ROUNDS = 4  # how many times the model may call tools before we stop
 # What the Claude Code bridge says when it could not answer; the local model
 # takes over rather than JARVIS saying it aloud.
@@ -64,7 +66,7 @@ class Brain:
         self.cfg = config["ai"]
         self.bus = bus
         self.dispatcher = dispatcher
-        self.backend = self.cfg.get("backend", "anthropic")
+        self.backend = self.cfg.get("backend", "auto")
         # Tools that exist only in the moment, like the dimensions of the model
         # on screen: a callable returning (tool specs, extra system text), and
         # the coroutine that runs them. Set by the host.
@@ -81,10 +83,11 @@ class Brain:
         # through the Claude Code login when the CLI is here (4-12 s, and it
         # turned "fit a wider face" into three right edits where the local
         # model made one), with the configured backend as the fallback.
-        # ai.smart_backend: "claude-code" (default) or "off".
+        # ai.smart_backend: "claude-code" or "off" (the default: it runs on the
+        # user's own Claude login, which they switch on themselves).
         self._smart_cmd = None
         self.cmd_history: List[Dict[str, str]] = []
-        if self.cfg.get("smart_backend", "claude-code") == "claude-code" and \
+        if self.cfg.get("smart_backend", "off") == "claude-code" and \
                 self.cfg.get("backend") not in ("offline", "command", "claude-code"):
             bridge = pathlib.Path(__file__).resolve().parents[2] / "bridge" / "claude_code.py"
             if bridge.exists() and self._claude_binary(bridge):
@@ -96,17 +99,29 @@ class Brain:
     # -------------------------------------------------------------- setup
 
     def _init_client(self) -> None:
+        if self.backend == "auto":
+            # Whatever this machine can actually answer with, best first.
+            if os.environ.get(self.cfg.get("api_key_env") or "ANTHROPIC_API_KEY"):
+                self.backend = "anthropic"
+            elif platforms.ollama():
+                self.backend = "ollama"
+            else:
+                self.status, self.detail = "offline", "intents only — no API key, no Ollama"
+                self.backend = "offline"
+                return
         if self.backend == "anthropic":
             key = os.environ.get(self.cfg.get("api_key_env") or "ANTHROPIC_API_KEY")
             if not key:
                 # Going straight to offline was wrong: it left J.A.R.V.I.S.
-                # with no model at all while a signed-in Claude Code CLI sat on
-                # the same machine, and the only sign was one line of config
-                # nobody reads. Fall through to whatever is actually here.
-                self.backend = "claude-code"
+                # with no model at all while another one sat on the same
+                # machine, and the only sign was one line of config nobody
+                # reads. Fall through to whatever is actually here: a local
+                # model, or a Claude Code login its owner has switched on.
+                self.backend = "ollama" if platforms.ollama() else (
+                    "claude-code" if self.cfg.get("smart_backend") == "claude-code" else "offline")
                 self._init_client()
                 if self.status == "ready":
-                    self.detail += " (no API key; using the Claude Code login)"
+                    self.detail += " (no API key)"
                 else:
                     self.backend, self.status = "offline", "no-key"
                     self.detail = (f"{self.cfg.get('api_key_env', 'ANTHROPIC_API_KEY')} "
@@ -232,16 +247,16 @@ class Brain:
         if local_ok or "not running" not in self.detail:
             self._label()
             return local_ok
-        import shutil
-        exe = shutil.which("ollama") or next((p for p in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama")
-                                              if os.path.exists(p)), None)
+        exe = platforms.ollama()
         if not exe:
             return False
         logdir = pathlib.Path(__file__).resolve().parents[2] / "logs"
         logdir.mkdir(exist_ok=True)
         with open(logdir / "ollama.log", "ab") as log:
+            detach = ({"creationflags": 0x00000008 | 0x08000000} if sys.platform == "win32"
+                      else {"start_new_session": True})
             subprocess.Popen([exe, "serve"], stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-                             start_new_session=True)
+                             **detach)
         await self.bus.publish("log", level="info", text="brain: started ollama serve")
         for _ in range(40):
             await asyncio.sleep(0.25)

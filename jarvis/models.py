@@ -15,6 +15,8 @@ import re
 import time
 from typing import Dict, List, Optional
 
+from . import platforms
+
 # Only what the HUD viewer can actually parse. Listing .3mf and .obj here
 # indexed files the viewer then failed to open — an index that offers a model
 # it cannot render is worse than one that omits it.
@@ -23,12 +25,20 @@ from typing import Dict, List, Optional
 # model you turn is the live source rather than a stale export — and none of it
 # needs Accessibility, because the model is inside the interface.
 SUFFIXES = (".stl", ".scad", ".step", ".stp")
-OPENSCAD = "/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD"
+# Found, not assumed: "" when OpenSCAD is not installed, and .scad files are
+# then listed but not drawn.
+OPENSCAD = platforms.openscad() or ""
+
+
+def have_openscad() -> bool:
+    return bool(OPENSCAD) and pathlib.Path(OPENSCAD).exists()
+
 
 # STEP is what Onshape exports, and most of the Mark IV lives only in it. It
-# is converted to STL by CadQuery, which is not in this environment; the first
-# interpreter below that can import it is used, and the result is cached.
-STEP_PYTHONS = ("~/FTC_BIOBUZZ/cqenv/bin/python", "python3")
+# is converted to STL by CadQuery, a large optional install; the first
+# interpreter from platforms.step_pythons() (models.step_python in jarvis.json,
+# then .step-env, then this one) that can import it is used, and the result is
+# cached.
 
 # Source files cannot be rendered in the HUD — they are code that has to be
 # compiled — but they can be opened in the application that owns them.
@@ -37,7 +47,16 @@ SOURCE_APPS = {".scad": "OpenSCAD", ".f3d": "Autodesk Fusion 360",
                ".sldprt": "SOLIDWORKS", ".3mf": "OpenSCAD"}
 
 # Library code is not a model of anything; never offer it as one.
-_LIBRARY = re.compile(r"/(lib|libraries|BOSL2|MCAD|node_modules|\.git)/", re.I)
+_LIBRARY = re.compile(r"[/\\](lib|libraries|BOSL2|MCAD|node_modules|\.git)[/\\]", re.I)
+
+# Folders never worth walking into. The default roots for someone new are
+# Documents, Desktop and Downloads, and one node_modules or photo library in
+# there is hundreds of thousands of files that are not models.
+_SKIP_DIRS = {"node_modules", "library", "appdata", "__pycache__", "site-packages",
+              "venv", "env", "build", "dist", "lib", "libraries", "bosl2", "mcad",
+              "photos library.photoslibrary", "pictures", "music", "movies", "videos"}
+# Seconds one scan may take before it settles for what it has found.
+SCAN_BUDGET = 8.0
 
 # Words that say nothing about which model this is, dropped when matching a
 # spoken name against a filename. The format words matter: "open astrowilly
@@ -96,30 +115,35 @@ class ModelIndex:
         if cache and not force and time.time() - stamp < 120:
             return cache
         wanted = SOURCE_SUFFIXES if sources else SUFFIXES
+        import os
         found: List[Dict[str, object]] = []
+        deadline = time.time() + SCAN_BUDGET
         for root in self.roots:
-            for path in root.rglob("*"):
-                if len(found) >= self.max_files:
+            for folder, dirs, files in os.walk(root):
+                # Pruned on the way down rather than filtered on the way out:
+                # the walk never enters what it would only throw away.
+                dirs[:] = [d for d in dirs if not d.startswith(".")
+                           and d.lower() not in _SKIP_DIRS]
+                if len(found) >= self.max_files or time.time() > deadline:
+                    dirs[:] = []
                     break
-                if path.suffix.lower() not in wanted or not path.is_file():
-                    continue
-                if _LIBRARY.search(str(path)):
-                    continue
-                if any(part.startswith(".") for part in path.parts):
-                    continue
-                try:
-                    size = path.stat().st_size
-                except OSError:
-                    continue
-                found.append({
-                    "name": path.stem,
-                    "path": str(path),
-                    "rel": str(path.relative_to(root)),
-                    "project": root.name,
-                    "size": size,
-                    "suffix": path.suffix.lower(),
-                    "app": SOURCE_APPS.get(path.suffix.lower()),
-                })
+                for name in files:
+                    path = pathlib.Path(folder) / name
+                    if path.suffix.lower() not in wanted or name.startswith("."):
+                        continue
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        continue
+                    found.append({
+                        "name": path.stem,
+                        "path": str(path),
+                        "rel": str(path.relative_to(root)),
+                        "project": root.name,
+                        "size": size,
+                        "suffix": path.suffix.lower(),
+                        "app": SOURCE_APPS.get(path.suffix.lower()),
+                    })
         found.sort(key=lambda m: (str(m["project"]), str(m["name"])))
         if sources:
             self._sources, self._sources_scanned = found, time.time()
@@ -175,7 +199,7 @@ class ModelIndex:
         """Compile a .scad to STL, cached on the source's modification time."""
         import subprocess
 
-        if not pathlib.Path(OPENSCAD).exists():
+        if not have_openscad():
             return None
         out = self._built(path)
         if out is None:
@@ -209,7 +233,7 @@ class ModelIndex:
         import subprocess
         if self._step_python:
             return self._step_python
-        for cand in STEP_PYTHONS:
+        for cand in (*platforms.step_pythons(), "python3"):
             exe = str(pathlib.Path(cand).expanduser()) if "/" in cand else shutil.which(cand)
             if not exe or not pathlib.Path(exe).exists():
                 continue

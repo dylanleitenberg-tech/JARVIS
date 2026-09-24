@@ -236,7 +236,7 @@
       rec.onerror = (event) => {
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
           this.wantListening = false;
-          this.onError('microphone permission denied — click the mic icon in the address bar');
+          this.onError('the microphone was refused — press SETUP to allow it');
           this.onState('denied');
         } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
           this.onError(event.error);

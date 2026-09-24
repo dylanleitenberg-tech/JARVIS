@@ -15,7 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from jarvis import config as config_module
 from jarvis.bus import Bus
-from jarvis.control import macos
+from jarvis.control import desktop as macos    # whichever backend this OS uses
 from jarvis.vision import cad
 
 

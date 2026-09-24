@@ -1,8 +1,52 @@
 # J.A.R.V.I.S.
 
-A local Stark-style assistant for macOS: voice in, voice out, hand and body
-tracking, and real control of the machine — all behind an interface built to
-look like the one in the films.
+A local Stark-style assistant for macOS, Windows and Linux: voice in, voice
+out, hand and body tracking, 3D models you turn with your hands, and real
+control of the machine — all behind an interface built to look like the one
+in the films.
+
+## Install
+
+**macOS or Linux** — paste into a terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dylanleitenberg-tech/JARVIS/main/install.sh | sh
+```
+
+**Windows** — paste into PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/dylanleitenberg-tech/JARVIS/main/install.ps1 | iex"
+```
+
+No administrator rights and no Python needed: it installs into your own
+folders with a private Python, adds JARVIS to your Applications / Start menu /
+app menu, and opens it. Run it again to update. About 750 MB.
+
+**On first open, JARVIS asks for everything it needs** — camera, microphone,
+and on a Mac Accessibility and app control — and its SETUP panel shows the
+state of each with a button that asks for it. Press SETUP (or `p`) any time.
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Voice | Chrome or Edge | Chrome or Edge (Edge is built in) | Chrome or Edge |
+| Hand tracking | yes | yes | yes |
+| Keyboard, mouse, windows | after Accessibility | yes | X11 yes; Wayland does not allow it |
+| Local AI (free) | [Ollama](https://ollama.com/download), then DOWNLOAD in SETUP | same | same |
+
+Voice recognition runs in the browser, so what you say is transcribed by
+Google (Chrome) or Microsoft (Edge). The camera never leaves your machine. For
+answers beyond the fixed commands, install Ollama for a free local model, or
+set `ANTHROPIC_API_KEY` to use Claude. `.scad` files need
+[OpenSCAD](https://openscad.org); STEP files need the installer's
+`--with-step` option (CadQuery, about 1 GB).
+
+Uninstall: `sh ~/Library/Application\ Support/JARVIS/install.sh --uninstall`
+(Mac), `sh ~/.local/share/jarvis/install.sh --uninstall` (Linux), or on
+Windows set `JARVIS_UNINSTALL=1` and run the install line again. Your model
+files are never touched.
+
+## From a checkout
 
 ```
 ./jarvis-run                 # everything

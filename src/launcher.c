@@ -206,9 +206,31 @@ int main(int argc, char **argv) {
     char probe[PATH_MAX];
     snprintf(probe, sizeof(probe), "%s/.venv/bin/python", up);
     if (access(probe, X_OK) != 0) {
-        const char *home = getenv("HOME");
-        if (home == NULL) return 1;
-        snprintf(up, PATH_MAX, "%s/JARVIS", home);
+        /* Installed by install.sh the code lives elsewhere, and the installer
+         * writes where into the bundle: Contents/Resources/jarvis-root. */
+        /* String cuts, not dirname(): that may hand back the same internal
+         * buffer `up` already points into, and overwrite it. */
+        char contents[PATH_MAX], saved[PATH_MAX] = "";
+        snprintf(contents, sizeof(contents), "%s", resolved);
+        for (int i = 0; i < 2; i++) {             /* .../Contents/MacOS/jarvis */
+            char *slash = strrchr(contents, '/');
+            if (slash != NULL) *slash = '\0';
+        }
+        char file[PATH_MAX];
+        snprintf(file, sizeof(file), "%s/Resources/jarvis-root", contents);
+        FILE *f = fopen(file, "r");
+        if (f != NULL) {
+            if (fgets(saved, sizeof(saved), f) != NULL)
+                saved[strcspn(saved, "\r\n")] = '\0';
+            fclose(f);
+        }
+        if (saved[0] != '\0') {
+            snprintf(up, PATH_MAX, "%s", saved);
+        } else {
+            const char *home = getenv("HOME");
+            if (home == NULL) return 1;
+            snprintf(up, PATH_MAX, "%s/JARVIS", home);
+        }
     }
     if (chdir(up) != 0) return 1;
     char *rootdir = up;

@@ -32,6 +32,7 @@
     <span class="switch-track"><i></i></span>
     <span class="switch-state">OFF</span>
   </button>
+  <button class="ghost setup-btn" id="btn-setup" title="Permissions and setup (p)">SETUP</button>
   <button class="ghost power" id="btn-power" title="Power down (shift+Q)">⏻</button>
   <div class="clock">
     <div id="clock-time">--:--:--</div>
@@ -169,6 +170,21 @@
   </span>
 </button>
 
+<!-- ------------------------------------------------------------ setup
+     Everything the machine has to allow, its state here, and a button that
+     asks for it. Shown on load until the required ones are granted. -->
+<div class="setup" id="setup" hidden>
+  <div class="setup-box" role="dialog" aria-labelledby="setup-title">
+    <h3 id="setup-title">SYSTEM ACCESS</h3>
+    <p class="setup-sub" id="setup-sub">J.A.R.V.I.S. needs a few permissions to see, hear and act.</p>
+    <ol class="setup-list" id="setup-list"></ol>
+    <p class="setup-note" id="setup-note"></p>
+    <div class="setup-actions">
+      <button class="ghost" id="setup-continue">CONTINUE</button>
+    </div>
+  </div>
+</div>
+
 <!-- ------------------------------------------------------- model viewer -->
 <div class="model-view" id="model-view" hidden>
   <header class="model-head">
@@ -237,6 +253,7 @@
 <script src="js/model.js"></script>
 <script src="js/hud.js"></script>
 <script src="js/handpanel.js"></script>
+<script src="js/setup.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

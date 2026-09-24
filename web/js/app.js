@@ -26,6 +26,9 @@
   const viewer = build('model viewer', () => new ModelViewer(),
                        { onVision() {}, toggle() {}, load: async () => false,
                          reset() {}, open: false });
+  const setup = build('setup', () => new Setup(),
+                      { boot() {}, toggle() {}, close() {}, open: false, onAskMic: () => {} });
+  let setupBooted = false;
   // Exposed so the drawer can be driven from the console while tuning.
   window.jarvis = { core, hud, panel, bus, viewer };
   let speech = null;
@@ -58,6 +61,10 @@
       hud.log('interface error during startup: ' + err.message, 'error');
     } finally {
       hud.boot(!(config && config.hud && config.hud.boot_sequence))
+         .then(() => {
+           // Once per page: the permissions panel, if anything needs granting.
+           if (!setupBooted) { setupBooted = true; setup.boot(); }
+         })
          .then(() => bus.send({
            type: 'ready',
            // Which voices the browser actually has, and which one won. The
@@ -294,6 +301,9 @@
     const why = document.getElementById('mic-prompt-why');
 
     const request = async () => {
+      // Already listening: a second start() would run a second recogniser
+      // alongside the first, and every command would arrive twice.
+      if (speech.micOk === true && speech.wantListening) { prompt.hidden = true; return; }
       why.textContent = 'requesting…';
       await speech.start();
       if (speech.micOk === false) {
@@ -313,6 +323,7 @@
 
     prompt.hidden = false;
     prompt.onclick = request;
+    setup.onAskMic = request;
     // Any first interaction anywhere also counts, so the prompt is a hint
     // rather than a gate.
     const arm = () => {
@@ -322,7 +333,11 @@
     };
     window.addEventListener('pointerdown', arm, { once: true });
     window.addEventListener('keydown', arm, { once: true });
-    hud.log('click ENABLE MICROPHONE to let J.A.R.V.I.S. hear you', 'warn');
+    // And ask on load. The permission is saved in this window's own browser
+    // profile, so no click is needed; waiting for one left every launch deaf
+    // until somebody happened to touch the window. If the browser does want
+    // a click after all, the prompt above is still there for it.
+    request();
   }
 
   /* ---------------------------------------------------------- controls */
@@ -370,9 +385,12 @@
   });
 
   window.addEventListener('keydown', (event) => {
-    const typing = document.activeElement === composer;
+    // Any text field, not only the composer: typing "h" into the model search
+    // used to open the hand drawer, and "p" into a folder path the setup panel.
+    const typing = /^(INPUT|TEXTAREA)$/.test((document.activeElement || {}).tagName || '');
     if (event.key === 'Escape') {
-      if (panel.open) panel.toggle(false);
+      if (setup.open) setup.close(false);
+      else if (panel.open) panel.toggle(false);
       else if (hud.confirmOpen) hud.dismissConfirm();
       else if (speech) speech.shutUp();
       composer.blur();
@@ -383,6 +401,7 @@
     if (event.key === 'c') document.body.classList.toggle('hide-cursor');
     if (event.key === 'g') document.getElementById('btn-arm').click();
     if (event.key === 'h') panel.toggle();
+    if (event.key === 'p') setup.toggle();
     if (event.key === 'm') { viewer.toggle(); if (viewer.open) refreshModels(''); }
     if (event.key === 'Q' && event.shiftKey) powerDown();
     if (event.key === 't') {
@@ -482,6 +501,7 @@
   });
 
   document.getElementById('btn-power').onclick = powerDown;
+  document.getElementById('btn-setup').onclick = () => setup.toggle();
 
   bus.connect();
 })();

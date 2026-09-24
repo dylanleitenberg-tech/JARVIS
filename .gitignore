@@ -9,3 +9,5 @@ build/scad/
 build/scad_edit/
 build/scad_backups/
 build/step_edit/
+.step-env/
+.uv/
