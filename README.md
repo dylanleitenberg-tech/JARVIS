@@ -391,6 +391,28 @@ at finer detail: facets of 14 degrees instead of 26, 2.5 times the
 triangles, a few seconds. Asking to reshape a STEP or STL gets a plain
 answer: its shape is fixed here, and it can be turned, zoomed or smoothed.
 
+### Changing the shape itself
+
+Some changes are not a number: "add a 3 mm hole through each temple arm",
+"make the nozzle 20 percent longer", "remove the gimbal". Those go to Claude
+(through the Claude Code login), which writes the edit; JARVIS builds it,
+sends any build error back for one repair, and shows the result. It takes
+20 to 50 seconds, and JARVIS says "Working on it" first. If the request is
+unclear Claude asks, and the answer goes back to it.
+
+- **OpenSCAD** parts: Claude edits the source (new features become named
+  variables where it can). The edited source lives in memory and compiles from
+  a hidden file beside the original, so includes still resolve; dimension edits
+  layer on top, and "undo" steps back through both in order.
+- **STEP** assemblies (the Mark IV exports from Onshape): there are no
+  dimensions, so Claude writes a short script over the named parts: move,
+  rotate, scale, stretch along an axis holding one end, delete, add, copy,
+  mirror, cut, join, fillet. It runs in the CadQuery interpreter
+  (`jarvis/step_tool.py`) with no imports and no file or system access; the
+  script is checked before it runs. The original export is never written:
+  "save" writes `<name>-jarvis-<date>.step` beside it, with an
+  `.edits.txt` listing every edit and its script, and part names intact.
+
 The file on disk is untouched until "save", which rewrites only the number on
 each changed line, keeps the comments, and first copies the original to
 `build/scad_backups/`. With no editable model open, "undo" and "save" are

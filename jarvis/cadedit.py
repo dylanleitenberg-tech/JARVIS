@@ -147,10 +147,14 @@ def _literal(text: str, name: str = "") -> Tuple[object, str]:
 
 def parameters(path: pathlib.Path) -> List[Param]:
     """The file's own top-level literal assignments, in order."""
+    return parameters_text(path.read_text(errors="replace"))
+
+
+def parameters_text(text: str) -> List[Param]:
     out: List[Param] = []
     depth = 0
     seen: Dict[str, int] = {}
-    for i, line in enumerate(path.read_text(errors="replace").splitlines()):
+    for i, line in enumerate(text.splitlines()):
         code = line.split("//", 1)[0]
         if depth == 0:
             m = _ASSIGN.match(line)
@@ -200,7 +204,10 @@ class EditSession:
         self.params = parameters(path)
         self.by_name = {p.name: p for p in self.params}
         self.overrides: Dict[str, object] = {}
-        self.history: List[Dict[str, object]] = []
+        # Source edited by "add a hole" and the like: held here, not on disk,
+        # until "save". None means the file as it is.
+        self.text: Optional[str] = None
+        self.history: List[Dict[str, object]] = []   # snapshots {"o": overrides, "t": text}
         self.last_error = ""
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
@@ -281,7 +288,7 @@ class EditSession:
         last_name, last_t = self._last_edit
         now = time.monotonic()
         if not (last_name == name and now - last_t < 1.5):
-            self.history.append(dict(self.overrides))
+            self.history.append(self._snapshot())
         self._last_edit = (name, now)
         if value == p.value:
             self.overrides.pop(name, None)
@@ -308,23 +315,54 @@ class EditSession:
             new = cur * (1 + sign * frac) if cur != 0 else sign * (p.bounds()[2] or 1.0)
         return self.set(name, new)
 
+    def _snapshot(self) -> Dict[str, object]:
+        return {"o": dict(self.overrides), "t": self.text}
+
+    def _restore(self, snap: Dict[str, object]) -> None:
+        text = snap["t"]
+        if text != self.text:
+            self._reparse(text)
+        self.overrides = dict(snap["o"])
+
+    def _reparse(self, text: Optional[str]) -> None:
+        self.text = text
+        self.params = parameters_text(text if text is not None else self.path.read_text(errors="replace"))
+        self.by_name = {p.name: p for p in self.params}
+        self.overrides = {k: v for k, v in self.overrides.items() if k in self.by_name}
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self.overrides) or self.text is not None
+
+    def source(self) -> str:
+        return self.text if self.text is not None else self.path.read_text(errors="replace")
+
+    def set_source(self, text: str) -> None:
+        """A whole new source, from an edit to the code itself."""
+        self.history.append(self._snapshot())
+        self._last_edit = ("", 0.0)
+        self._reparse(text)
+
     def undo(self) -> bool:
         if not self.history:
             return False
         self._last_edit = ("", 0.0)
-        self.overrides = self.history.pop()
+        self._restore(self.history.pop())
         return True
 
     def reset(self) -> None:
-        if self.overrides:
-            self.history.append(dict(self.overrides))
+        if self.dirty:
+            self.history.append(self._snapshot())
         self.overrides = {}
+        if self.text is not None:
+            self._reparse(None)
 
     # ------------------------------------------------------------ build
 
     def key(self) -> str:
         stamp = self.path.stat().st_mtime_ns
-        body = f"{self.path}:{stamp}:" + ";".join(
+        src = hashlib.sha1(self.text.encode()).hexdigest() if self.text is not None else "file"
+        body = f"{self.path}:{stamp}:{src}:" + ";".join(
             f"{k}={_format(v, self.by_name[k].kind)}" for k, v in sorted(self.overrides.items()))
         return hashlib.sha1(body.encode()).hexdigest()[:16]
 
@@ -344,7 +382,20 @@ class EditSession:
                 "-o", str(out)]
         for k, v in sorted(self.overrides.items()):
             args += ["-D", f"{k}={_format(v, self.by_name[k].kind)}"]
-        args.append(str(self.path))
+        # Edited source compiles from a hidden file beside the original, so its
+        # include<> and use<> paths still resolve; it is removed right after.
+        scratch = None
+        if self.text is not None:
+            scratch = self.path.with_name(f".jarvis-edit-{self.path.stem}.scad")
+            scratch.write_text(self.text)
+        args.append(str(scratch or self.path))
+        try:
+            return self._compile(args, out)
+        finally:
+            if scratch is not None:
+                scratch.unlink(missing_ok=True)
+
+    def _compile(self, args: List[str], out: pathlib.Path) -> Optional[pathlib.Path]:
         with self._lock:
             self._generation += 1
             gen = self._generation
@@ -372,14 +423,15 @@ class EditSession:
     # ------------------------------------------------------------ save
 
     def save(self) -> Optional[pathlib.Path]:
-        """Write the overrides into the source, only the number on each line.
-        The original is copied to build/scad_backups first. Returns the backup."""
-        if not self.overrides:
+        """Write the edits into the source: edited code as it stands, and each
+        changed dimension as only the number on its line. The original is
+        copied to build/scad_backups first. Returns the backup."""
+        if not self.dirty:
             return None
         BACKUPS.mkdir(parents=True, exist_ok=True)
         backup = BACKUPS / f"{self.path.stem}-{time.strftime('%Y%m%d-%H%M%S')}.scad"
         shutil.copy2(self.path, backup)
-        lines = self.path.read_text(errors="replace").splitlines(keepends=True)
+        lines = self.source().splitlines(keepends=True)
         for name, value in self.overrides.items():
             p = self.by_name[name]
             raw = lines[p.line]
@@ -390,9 +442,8 @@ class EditSession:
             lines[p.line] = (m.group("indent") + name + m.group("eq") +
                              _format(value, p.kind) + m.group("tail") + end)
         self.path.write_text("".join(lines))
-        # The written values are now the base.
-        self.params = parameters(self.path)
-        self.by_name = {p.name: p for p in self.params}
+        # The written file is now the base.
         self.overrides = {}
+        self._reparse(None)
         self.history = []
         return backup

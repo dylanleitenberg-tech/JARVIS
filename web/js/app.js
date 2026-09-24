@@ -392,7 +392,8 @@
 
   // Live CAD edits: the assistant owns the numbers and the builds; the viewer
   // shows the dimensions, sends slider and hand changes, and swaps the mesh.
-  bus.on('cad_params', (e) => { if (viewer.setParams) viewer.setParams(e.params, e.name, e.dirty); });
+  bus.on('cad_params', (e) => { if (viewer.setParams) viewer.setParams(e.params, e.name, e.dirty, e.edits, e.mode); });
+  bus.on('cad_done', () => { if (viewer.setBuilding) viewer.setBuilding(false); });
   bus.on('cad_panel', () => { const el = document.getElementById('model-params'); if (el && viewer.params && viewer.params.length) el.hidden = false; });
   bus.on('cad_select', (e) => { if (viewer.selectParam) viewer.selectParam(e.name); });
   bus.on('cad_building', () => { if (viewer.setBuilding) viewer.setBuilding(true); });

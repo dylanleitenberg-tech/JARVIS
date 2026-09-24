@@ -19,6 +19,7 @@ import atexit
 import contextlib
 import errno
 import os
+import json
 import re
 import signal
 import subprocess
@@ -82,6 +83,9 @@ class Jarvis:
         intents.param_resolve = lambda name: self.cad_edit.resolve(name) if self.cad_edit else (None, [])
         self._cad_pending: Optional[Dict[str, Any]] = None     # a question JARVIS asked
         self._shown = None                                     # path of the model on screen
+        self.step_edit = None                                  # StepSession for a STEP on screen
+        self._modify_lock = asyncio.Lock()
+        self._modify_pending: Optional[Dict[str, Any]] = None  # an edit waiting on an answer
         self._cad_msg = ""
 
     # --------------------------------------------------------------- setup
@@ -706,6 +710,12 @@ class Jarvis:
         # JARVIS asked "lens width, lens height or lens radius?" and this is the answer.
         if self._cad_pending and await self._answer_cad_question(text, source):
             return
+        # Claude asked something about a geometry edit ("which end stays fixed?").
+        if self._modify_pending:
+            pending, self._modify_pending = self._modify_pending, None
+            if time.time() - pending["at"] < 90 and not intents.match(text):
+                asyncio.create_task(self.modify_geometry(f"{pending['request']} (answer to your question: {text})"))
+                return
 
         intent = intents.match(text)
         if intent is not None:
@@ -814,7 +824,10 @@ class Jarvis:
         # "Make the nozzle longer" with a STEP on screen: nothing to edit, and
         # silence (or a model with no idea what is on screen) is the worst answer.
         if self._fixed_geometry_request(text):
-            await self.say(self._fixed_geometry_line())
+            if self.step_edit is not None:
+                asyncio.create_task(self.modify_geometry(text))
+            else:
+                await self.say(self._fixed_geometry_line())
             return
 
         # Nothing matched locally — hand it to the model.
@@ -824,11 +837,14 @@ class Jarvis:
     # ------------------------------------------------------- live CAD edits
 
     def _edit_output(self, key: str):
-        s = self.cad_edit
-        if s is None or not (len(key) == 16 and all(c in "0123456789abcdef" for c in key)):
+        if not (len(key) == 16 and all(c in "0123456789abcdef" for c in key)):
             return None
-        path = s.output(key)
-        return path if path.exists() else None
+        for s in (self.cad_edit, self.step_edit):
+            if s is not None:
+                path = s.output(key)
+                if path.exists():
+                    return path
+        return None
 
     async def start_edit(self, raw_path: str) -> None:
         """The viewer loaded a model. A .scad one becomes editable."""
@@ -837,6 +853,11 @@ class Jarvis:
         from .models import OPENSCAD
         path = self.models.resolve(raw_path) if raw_path else None
         self._shown = path
+        if path is not None and path.suffix.lower() in (".step", ".stp"):
+            self.cad_edit = None
+            await self._start_step_edit(path)
+            return
+        self.step_edit = None
         if path is None or path.suffix.lower() != ".scad" or not pathlib.Path(OPENSCAD).exists():
             self.cad_edit = None
             await self.bus.publish("cad_params", path=None, params=[], dirty=False)
@@ -850,12 +871,56 @@ class Jarvis:
                 return
         s = self.cad_edit
         await self.bus.publish("cad_params", path=str(path), name=path.stem,
-                               params=s.state(), dirty=bool(s.overrides))
+                               params=s.state(), dirty=s.dirty)
+
+    async def _start_step_edit(self, path) -> None:
+        from .stepedit import StepSession
+        python = self.models.step_python()
+        if python is None:
+            self.step_edit = None
+            await self.bus.publish("cad_params", path=None, params=[], dirty=False)
+            return
+        if self.step_edit is None or self.step_edit.path != path:
+            self.step_edit = StepSession(path, python)
+            # Reading the part list takes a few seconds on a big assembly; do
+            # it now so the first spoken edit does not wait on it.
+            session = self.step_edit
+            asyncio.create_task(asyncio.to_thread(self._warm_inventory, session))
+        await self._publish_step_state()
+
+    @staticmethod
+    def _warm_inventory(session) -> None:
+        try:
+            session.inventory()
+        except Exception:
+            pass
+
+    async def _publish_step_state(self) -> None:
+        s = self.step_edit
+        if s is None:
+            return
+        await self.bus.publish("cad_params", path=str(s.path), name=s.path.stem, params=[],
+                               dirty=s.dirty, edits=[e["say"] or e["request"] for e in s.scripts],
+                               mode="step")
 
     def _schedule_rebuild(self, changed: Optional[str] = None) -> None:
         asyncio.create_task(self._rebuild(changed))
 
     async def _rebuild(self, changed: Optional[str] = None) -> None:
+        if self.cad_edit is None and self.step_edit is not None:
+            st = self.step_edit
+            await self.bus.publish("cad_building", name=changed)
+            out = await asyncio.to_thread(st.build)
+            if st is not self.step_edit:
+                return
+            if out is None:
+                await self.bus.publish("cad_failed", name=changed, error=st.last_error[-300:])
+                return
+            key = out.stem.rsplit("-", 1)[1]
+            await self.bus.publish("model_update", url=f"/api/model_edit?key={key}",
+                                   dirty=st.dirty, edits=[e["say"] or e["request"] for e in st.scripts])
+            await self._publish_step_state()
+            return
         s = self.cad_edit
         if s is None:
             return
@@ -872,7 +937,7 @@ class Jarvis:
             return
         key = out.stem.rsplit("-", 1)[1]
         await self.bus.publish("model_update", url=f"/api/model_edit?key={key}",
-                               params=s.state(), changed=changed, dirty=bool(s.overrides),
+                               params=s.state(), changed=changed, dirty=s.dirty,
                                seconds=round(time.time() - started, 2))
 
     @staticmethod
@@ -894,6 +959,34 @@ class Jarvis:
             if speak:
                 await self.say(line)
 
+        if action == "__cad_modify":
+            asyncio.create_task(self.modify_geometry(str(args.get("request", "")), speak=speak))
+            return True
+        st = self.step_edit if self.cad_edit is None else None
+        if st is not None and action in ("__cad_undo", "__cad_reset", "__cad_save"):
+            if action == "__cad_undo":
+                if st.undo():
+                    self._schedule_rebuild()
+                    await tell("Undone.")
+                else:
+                    await tell("Nothing to undo.")
+            elif action == "__cad_reset":
+                st.reset()
+                self._schedule_rebuild()
+                await tell("Back to the original export.")
+            else:
+                if not st.dirty:
+                    await tell("Nothing has changed.")
+                    return True
+                await tell("Saving a new STEP file. This takes a few seconds.")
+                try:
+                    dest = await asyncio.to_thread(st.save)
+                except Exception as exc:
+                    await tell(f"Not saved. {exc}"[:160])
+                    return True
+                await self.bus.publish("log", level="info", text=f"saved {dest}")
+                await tell(f"Saved as {dest.name}, next to the original. The original is untouched.")
+            return True
         s = self.cad_edit
         if action == "__cad_undo":
             if s and s.undo():
@@ -908,7 +1001,7 @@ class Jarvis:
             if s is None:
                 await self.dispatcher.run("press_key", {"combo": "cmd+s"}, source=source)
                 return True
-            if not s.overrides:
+            if not s.dirty:
                 await tell("Nothing has changed.")
                 return True
             try:
@@ -982,6 +1075,116 @@ class Jarvis:
         self._schedule_rebuild(p.name)
         await tell(f"{p.readable}, {self._say_value(p, value)}.")
         return True
+
+    # ------------------------------------------------ geometry edits (Claude)
+
+    async def _claude_edit(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        import pathlib
+        import sys as _sys
+        bridge = pathlib.Path(__file__).resolve().parents[1] / "bridge" / "claude_edit.py"
+
+        def call() -> Dict[str, Any]:
+            proc = subprocess.run([_sys.executable, str(bridge)], input=json.dumps(payload),
+                                  capture_output=True, text=True, timeout=240)
+            lines = [l for l in proc.stdout.splitlines() if l.strip().startswith("{")]
+            return json.loads(lines[-1]) if lines else {"say": "The edit came back empty.", "failed": True}
+        return await asyncio.to_thread(call)
+
+    async def modify_geometry(self, request: str, speak: bool = True) -> str:
+        """A change dimensions cannot express ("add a hole", "make the nozzle
+        longer" on a STEP): Claude writes the edit, JARVIS checks it builds,
+        repairs once if not, and shows it. Nothing is written to disk."""
+        request = request.strip()
+        if not request:
+            return "No change was asked for."
+        if self._modify_lock.locked():
+            await self.say("Still working on the last change.")
+            return "busy"
+        async with self._modify_lock:
+            await self.bus.publish("cad_building", name="edit")
+            await self.say("Working on it.")
+            if self.cad_edit is not None:
+                line = await self._modify_scad(request)
+            elif self.step_edit is not None:
+                line = await self._modify_step(request)
+            else:
+                line = self._fixed_geometry_line() if self._shown is not None else \
+                    "Open a model first."
+            await self.bus.publish("cad_done")
+            await self.say(line)
+            return line
+
+    async def _modify_scad(self, request: str) -> str:
+        s = self.cad_edit
+        payload = {"mode": "scad", "request": request, "file": s.path.name, "source": s.source()}
+        error = previous = None
+        for attempt in range(2):
+            if error:
+                payload.update(error=error, previous=previous)
+            out = await self._claude_edit(payload)
+            if out.get("question"):
+                self._modify_pending = {"request": request, "at": time.time()}
+                return str(out.get("say") or "Which part do you mean?")
+            if out.get("failed"):
+                return str(out.get("say") or "The edit failed.")
+            edits = out.get("edits") or []
+            text = s.source()
+            problem = None
+            for e in edits:
+                find, repl = str(e.get("find", "")), str(e.get("replace", ""))
+                n = text.count(find) if find else 0
+                if n != 1:
+                    problem = f"'find' text occurs {n} times, must be exactly once: {find[:200]!r}"
+                    break
+                text = text.replace(find, repl, 1)
+            if problem is None and not edits:
+                problem = "no edits returned"
+            if problem is None:
+                s.set_source(text)
+                built = await asyncio.to_thread(s.compile)
+                if built is not None:
+                    key = built.stem.rsplit("-", 1)[1]
+                    await self.bus.publish("model_update", url=f"/api/model_edit?key={key}",
+                                           params=s.state(), dirty=s.dirty, changed="source")
+                    await self.bus.publish("cad_params", path=str(s.path), name=s.path.stem,
+                                           params=s.state(), dirty=True)
+                    return str(out.get("say") or "Done.")
+                problem = f"OpenSCAD: {s.last_error}"
+                s.undo()
+            error, previous = problem, json.dumps(edits)[:4000]
+        return f"I could not make that change work. {error[:120] if error else ''}"
+
+    async def _modify_step(self, request: str) -> str:
+        st = self.step_edit
+        try:
+            parts = await asyncio.to_thread(st.summary)
+        except Exception as exc:
+            return f"I could not read the parts of this file. {exc}"[:160]
+        payload = {"mode": "step", "request": request, "file": st.path.name, "parts": parts,
+                   "applied": [e["script"] for e in st.scripts]}
+        error = previous = None
+        for attempt in range(2):
+            if error:
+                payload.update(error=error, previous=previous)
+            out = await self._claude_edit(payload)
+            if out.get("question"):
+                self._modify_pending = {"request": request, "at": time.time()}
+                return str(out.get("say") or "Which part do you mean?")
+            if out.get("failed"):
+                return str(out.get("say") or "The edit failed.")
+            script = str(out.get("script") or "").strip()
+            if not script:
+                error, previous = "no script returned", ""
+                continue
+            res = await asyncio.to_thread(st.try_script, script)
+            if res.get("ok"):
+                st.add(script, str(out.get("say") or ""), request)
+                key = st.key()
+                await self.bus.publish("model_update", url=f"/api/model_edit?key={key}", dirty=True)
+                await self._publish_step_state()
+                return str(out.get("say") or "Done.")
+            error, previous = str(res.get("error", "failed")), script
+        return f"I could not make that change work. {str(error)[:140]}"
 
     _EDIT_WORDS = re.compile(
         r"\b(?:make|set|change|increase|decrease|reduce|extend|lengthen|shorten|widen|narrow|"
@@ -1095,12 +1298,27 @@ class Jarvis:
                   "description": "Render the model on screen smoother: smooth shading, and for a STEP "
                                  "file a finer conversion. Use for smooth, less faceted, higher detail.",
                   "input_schema": {"type": "object", "properties": {}}}
+        modify = {"name": "cad_modify",
+                  "description": "Change the part's geometry in a way its dimensions cannot: add, "
+                                 "remove, move, stretch, round or reshape features or parts. Pass the "
+                                 "user's request made precise (which feature, how much). Takes 10-40 s.",
+                  "input_schema": {"type": "object", "properties": {"request": {"type": "string"}},
+                                   "required": ["request"]}}
+        simple = lambda n, d: {"name": n, "description": d, "input_schema": {"type": "object", "properties": {}}}
         if self._shown is None:
             return [], ""
+        if self.step_edit is not None:
+            return [modify, smooth, simple("cad_undo", "Undo the last edit."),
+                    simple("cad_reset", "Discard all edits."),
+                    simple("cad_save", "Save the edited assembly as a new STEP file. Only when asked.")], (
+                f"The user has the STEP assembly '{self._shown.stem}' open in the model viewer. It "
+                "has no editable dimensions, but its parts can be moved, stretched, scaled, deleted, "
+                "cut or added to: any change to its shape goes through cad_modify with a precise "
+                "description. For smooth, less faceted or higher detail, call model_smooth.")
         if s is None or not s.params:
             return [smooth], (
                 f"The user has '{self._shown.stem}' ({self._shown.name}) open in the model viewer. "
-                "It is finished geometry (STEP or mesh) with no dimensions to edit here. If asked to "
+                "It is a mesh with no dimensions or named parts to edit here. If asked to "
                 "reshape it, say so in one sentence and offer to make it smooth; for smooth, less "
                 "faceted or higher detail, call model_smooth.")
         name = {"type": "string", "description": "exact dimension name from the list"}
@@ -1125,6 +1343,7 @@ class Jarvis:
             {"name": "cad_save", "description": "Write the edited dimensions into the model's file. Only when asked to save.",
              "input_schema": {"type": "object", "properties": {}}},
             smooth,
+            modify,
         ]
         rows = []
         for p in s.params[:120]:
@@ -1163,6 +1382,10 @@ class Jarvis:
         }
         if name == "model_smooth":
             return {"ok": True, "result": await self.smooth_model(speak=False)}
+        if name == "cad_modify":
+            # Long: run it in the background and let the model say it has started.
+            asyncio.create_task(self.modify_geometry(str(args.get("request", ""))))
+            return {"ok": True, "result": "started; it takes 10-40 seconds and I will say when it is done"}
         if name not in mapping:
             return {"ok": False, "error": f"no such tool {name}"}
         action, a = mapping[name]

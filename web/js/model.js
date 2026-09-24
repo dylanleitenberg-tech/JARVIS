@@ -436,10 +436,19 @@
     }
 
     /* The .scad on screen and its dimensions; an empty list hides the panel. */
-    setParams(params, name, dirty) {
+    setParams(params, name, dirty, edits, mode) {
       this.params = params || [];
       this.editParam = null;
       const el = this._panel();
+      if (mode === 'step') {
+        // A STEP has no dimensions: the panel lists the edits made so far.
+        const list = (edits || []).map((e, i) => `<div class="param edit"><label><span>${i + 1}. ${String(e).replace(/</g, '&lt;')}</span></label></div>`).join('')
+          || '<div class="param"><label><span>no edits yet</span></label></div>';
+        el.innerHTML = `<header><span>EDIT · ${String(name || '').replace(/_/g, ' ')}</span><i>${dirty ? 'unsaved' : 'original'}</i></header>` +
+          `<div class="params">${list}</div><footer>say "make the nozzle 20% longer" · "remove the gimbal" · "undo" · "save"</footer>`;
+        el.hidden = false;
+        return;
+      }
       if (!this.params.length) { el.hidden = true; el.innerHTML = ''; return; }
       const rows = this.params.map((p, i) => {
         const val = p.kind === 'bool'

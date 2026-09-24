@@ -91,6 +91,22 @@ check("save rewrites only the winning line", after.splitlines()[7].startswith("w
       after.splitlines()[7])
 check("after save the value is the base", s.current("width") == 50.0 and not s.overrides)
 
+# source edits: held in memory, compiled from a hidden sibling file, undone as one step
+src_before = f.read_text()
+s2 = cadedit.EditSession(f, OPENSCAD)
+s2.set_source(s2.source().replace("part();", "part();\ntranslate([0, 0, 20]) cube(5);"))
+check("source edit held in memory", s2.dirty and f.read_text() == src_before)
+if pathlib.Path(OPENSCAD).exists():
+    built = s2.compile()
+    check("edited source compiles", built is not None, s2.last_error)
+    check("no scratch file left", not list(tmp.glob(".jarvis-edit-*")))
+s2.set("width", 60)
+check("dimension edit on top of a source edit", s2.current("width") == 60.0)
+s2.undo()
+check("undo the dimension, keep the source edit", s2.text is not None and "width" not in s2.overrides)
+s2.undo()
+check("undo the source edit", s2.text is None and not s2.dirty)
+
 # voice rules only claim an utterance when the part has that parameter
 intents.param_lookup = s.find
 intents.model_lookup = lambda name: None

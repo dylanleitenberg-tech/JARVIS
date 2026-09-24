@@ -870,3 +870,5 @@ button.ghost.power:hover {
 .model-params .param input[type=range] { width: 100%; accent-color: #64e3ff; height: 14px; margin: 2px 0 0; }
 .model-params .param input[type=checkbox] { accent-color: #64e3ff; }
 .model-params footer { margin-top: auto; padding: 7px 12px; border-top: 1px solid var(--hud-faint); font-size: 9px; color: var(--hud-dim); letter-spacing: .06em; }
+
+.model-params .param.edit label span { white-space: normal; overflow: visible; }
